@@ -17,11 +17,6 @@ class Code:
     def printAll(self):
         for ins in self.instructions:
             print(ins)
-
-    def accessSection(self,section):
-        if not section in self.sections.keys():
-            raise Exception(f'Illegal Section Access {section}')
-        return self.sections[section]
     
     def renameLabel(self,label):
         target = hashlib.sha256(label.encode('utf-8')).hexdigest()
@@ -31,7 +26,7 @@ class Code:
             if oldLabel == label:
                 self.labels[idx] = target
 
-    def renameAllLabers(self):
+    def renameAllLabels(self):
         for label in self.labels:
             self.renameLabel(label)
 
@@ -148,5 +143,6 @@ with open("code.asm","r+") as input:
 
 
     TheCode.generate_dispatchers()
+    #TheCode.renameAllLabels()
     TheCode.saveToFile()
     #print(table)
