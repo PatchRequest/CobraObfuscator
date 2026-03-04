@@ -28,7 +28,7 @@ impl ObfuscationPass for ControlFlowFlatten {
             return Ok(false);
         }
 
-        // Only flatten with 40% probability to keep some functions natural
+        // Probabilistic: only flatten ~40% of eligible functions
         if !ctx.rng.gen_bool(0.4) {
             return Ok(false);
         }
@@ -49,9 +49,11 @@ impl ObfuscationPass for ControlFlowFlatten {
         let state_reg32 = Register::R15D;
         let num_blocks = func.blocks.len();
 
-        // Detect if the function uses RBP as a frame pointer (push rbp; mov rbp, rsp).
-        let has_frame_pointer = detect_frame_pointer(func);
-
+        // Detect frame pointer style:
+        // - `mov rbp, rsp`: RBP is 16 lower → positive RBP displacements need +16
+        // - `lea rbp, [rsp+N]`: only that LEA needs its displacement adjusted by +16
+        // - Neither: no adjustment needed
+        let fp_style = detect_frame_pointer_style(func);
         // Assign random state numbers to each block
         let mut state_numbers: Vec<u32> = (0..num_blocks as u32).collect();
         state_numbers.shuffle(&mut ctx.rng);
@@ -74,15 +76,18 @@ impl ObfuscationPass for ControlFlowFlatten {
         for (i, block) in func.blocks.iter().enumerate() {
             let mut insns = block.instructions.clone();
 
-            // Adjust RSP-relative memory operands by +16 to account for
-            // our preamble (push r15 + sub rsp, 8 = 16 bytes on stack).
-            // Also adjust RBP-relative operands if the function uses a frame pointer,
-            // since RBP will also be 16 bytes lower than expected.
+            // Adjust displacements to compensate for CFF preamble (push r15 + sub rsp, 8).
             for insn in &mut insns {
-                adjust_stack_displacements(&mut insn.instruction, has_frame_pointer);
+                adjust_stack_displacements(&mut insn.instruction, &fp_style);
             }
 
-            let original_first_ip = insns.first().map(|i| i.instruction.ip()).unwrap_or(0);
+            // Find the first instruction with a real (non-zero) IP.
+            // Junk insertion may prepend synthetic NOPs with IP=0 before real instructions.
+            let original_first_ip = insns
+                .iter()
+                .map(|i| i.instruction.ip())
+                .find(|&ip| ip != 0)
+                .unwrap_or(0);
             block_mappings.push(BlockMapping {
                 state: state_numbers[i],
                 insns,
@@ -147,9 +152,19 @@ impl ObfuscationPass for ControlFlowFlatten {
         let mut ip = blocks_start_ip;
         for mapping in &block_mappings {
             block_start_ips.push(ip);
-            let block_size = (mapping.insns.len() as u64) * 5 + 20;
+            let block_size = (mapping.insns.len() as u64) * 15 + 64;
             ip += block_size;
         }
+
+        // Build IP remap table: old block first IP → new block IP.
+        // This is needed because passes like dead-code insert mid-block branches
+        // targeting synthetic IPs. After CFF reassigns block IPs, those targets
+        // would be dangling. We remap them during instruction emission.
+        let ip_remap: std::collections::HashMap<u64, u64> = block_mappings
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.original_first_ip, block_start_ips[i]))
+            .collect();
 
         // Emit dispatcher: cmp/je pairs
         let mut dispatcher_insns: Vec<IrInsn> = Vec::new();
@@ -179,6 +194,11 @@ impl ObfuscationPass for ControlFlowFlatten {
                 if *need_ip {
                     ir.instruction.set_ip(block_ip);
                     *need_ip = false;
+                } else {
+                    // Clear original IPs on non-first instructions so BlockEncoder
+                    // doesn't misresolve external calls/jumps to in-function instructions
+                    // that happen to share the original function's entry IP.
+                    ir.instruction.set_ip(0);
                 }
                 all.push(ir);
             };
@@ -211,12 +231,8 @@ impl ObfuscationPass for ControlFlowFlatten {
                     iced_x86::FlowControl::UnconditionalBranch if is_last => {
                         let target_addr = insn.instruction.near_branch_target();
                         let target_block_idx = block_mappings.iter().position(|m| {
-                            m.insns
-                                .first()
-                                .map(|first| first.instruction.ip() == target_addr)
-                                .unwrap_or(false)
+                            m.original_first_ip != 0 && m.original_first_ip == target_addr
                         });
-
                         if let Some(idx) = target_block_idx {
                             let next_state = block_mappings[idx].state;
                             let mov = Instruction::with2(
@@ -245,10 +261,7 @@ impl ObfuscationPass for ControlFlowFlatten {
                     iced_x86::FlowControl::ConditionalBranch if is_last => {
                         let target_addr = insn.instruction.near_branch_target();
                         let target_block_idx = block_mappings.iter().position(|m| {
-                            m.insns
-                                .first()
-                                .map(|first| first.instruction.ip() == target_addr)
-                                .unwrap_or(false)
+                            m.original_first_ip != 0 && m.original_first_ip == target_addr
                         });
                         let fallthrough_idx = if i + 1 < block_mappings.len() {
                             Some(i + 1)
@@ -292,7 +305,27 @@ impl ObfuscationPass for ControlFlowFlatten {
                         }
                     }
                     _ => {
-                        emit(&mut all_insns, insn.clone(), &mut need_block_ip);
+                        // For mid-block branches (e.g., opaque predicates from dead-code),
+                        // remap targets so they point to the correct CFF block IP.
+                        let mut cloned = insn.clone();
+                        let f = cloned.instruction.flow_control();
+                        if (f == iced_x86::FlowControl::ConditionalBranch
+                            || f == iced_x86::FlowControl::UnconditionalBranch)
+                            && !is_last
+                        {
+                            let target = cloned.instruction.near_branch_target();
+                            if let Some(&new_ip) = ip_remap.get(&target) {
+                                log::debug!("CFF: remapping mid-block branch 0x{:x} → 0x{:x}", target, new_ip);
+                                // Re-create the branch with the remapped target
+                                let code = cloned.instruction.code();
+                                if let Ok(new_branch) = Instruction::with_branch(code, new_ip) {
+                                    cloned.instruction = new_branch;
+                                }
+                            } else {
+                                log::warn!("CFF: mid-block branch to 0x{:x} NOT in ip_remap!", target);
+                            }
+                        }
+                        emit(&mut all_insns, cloned, &mut need_block_ip);
                     }
                 }
             }
@@ -332,48 +365,101 @@ impl ObfuscationPass for ControlFlowFlatten {
     }
 }
 
-/// Adjust RSP-relative memory displacements by +16 to compensate for the CFF
-/// preamble (push r15 + sub rsp, 8 = 16 bytes on the stack).
+/// Frame pointer style detected in a function.
+#[derive(Debug, Clone, PartialEq)]
+enum FramePointerStyle {
+    /// No frame pointer detected — no adjustments needed.
+    None,
+    /// `mov rbp, rsp` style: RBP is 16 lower, positive RBP displacements need +16.
+    MovRbpRsp,
+    /// `lea rbp, [rsp+N]` style: only that LEA instruction needs its displacement +16.
+    /// All other RSP/RBP-relative accesses are self-consistent and need no adjustment.
+    LeaRbpRsp,
+}
+
+/// Adjust displacements to compensate for the CFF preamble (push r15 + sub rsp, 8 = 16 bytes).
 ///
-/// RBP-relative displacements are NOT adjusted because:
-/// - If the function uses a frame pointer (mov rbp, rsp), rbp is set AFTER the
-///   CFF preamble runs, so it already accounts for the extra 16 bytes.
-/// - If rbp is a general-purpose register, it holds a function-computed value
-///   and rbp-relative memory accesses reference arbitrary memory.
-fn adjust_stack_displacements(instr: &mut Instruction, _adjust_rbp: bool) {
+/// The key insight: RSP-relative accesses generally do NOT need adjustment because
+/// the shifted RSP is self-consistent for locals, call argument setup, and other
+/// RSP-relative operations. The callee's RSP is also shifted, so call args match.
+///
+/// For `mov rbp, rsp` frame pointers: RBP is 16 lower, so positive RBP offsets
+/// (accessing caller's frame / shadow space) need +16. Negative offsets (locals)
+/// are fine since they're relative to wherever RBP ends up.
+///
+/// For `lea rbp, [rsp+N]` frame pointers: only that specific LEA needs +16 on its
+/// displacement so RBP ends up at the same position as without CFF. Then all
+/// RBP-relative accesses (both positive and negative) are correct.
+fn adjust_stack_displacements(instr: &mut Instruction, fp_style: &FramePointerStyle) {
     const STACK_ADJUSTMENT: u64 = 16;
 
-    for op_idx in 0..instr.op_count() {
-        if instr.op_kind(op_idx) == iced_x86::OpKind::Memory {
-            let base = instr.memory_base();
-            if base == Register::RSP {
-                let disp = instr.memory_displacement64();
-                instr.set_memory_displacement64(disp.wrapping_add(STACK_ADJUSTMENT));
-                // Ensure displacement size is large enough to encode the new value
-                if instr.memory_displ_size() < 1 {
+    match fp_style {
+        FramePointerStyle::None => return,
+        FramePointerStyle::MovRbpRsp => {
+            // Adjust positive RBP-relative displacements only
+            for op_idx in 0..instr.op_count() {
+                if instr.op_kind(op_idx) == iced_x86::OpKind::Memory {
+                    if instr.memory_base() == Register::RBP {
+                        let disp_signed = instr.memory_displacement64() as i64;
+                        if disp_signed > 0 {
+                            let new_disp = instr.memory_displacement64().wrapping_add(STACK_ADJUSTMENT);
+                            instr.set_memory_displacement64(new_disp);
+                            let new_disp_signed = new_disp as i64;
+                            if instr.memory_displ_size() <= 1
+                                && !((-128..=127).contains(&new_disp_signed))
+                            {
+                                instr.set_memory_displ_size(4);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        FramePointerStyle::LeaRbpRsp => {
+            // Only adjust `lea rbp, [rsp+N]` instructions
+            let code = instr.code();
+            if matches!(code, Code::Lea_r64_m | Code::Lea_r32_m)
+                && instr.op0_register() == Register::RBP
+                && instr.memory_base() == Register::RSP
+                && instr.memory_index() == Register::None
+            {
+                let new_disp = instr.memory_displacement64().wrapping_add(STACK_ADJUSTMENT);
+                instr.set_memory_displacement64(new_disp);
+                let new_disp_signed = new_disp as i64;
+                if instr.memory_displ_size() <= 1
+                    && !((-128..=127).contains(&new_disp_signed))
+                {
                     instr.set_memory_displ_size(4);
                 }
             }
-            break; // Only one memory operand per x86 instruction
         }
     }
 }
 
-/// Detect if a function uses RBP as a frame pointer (has `mov rbp, rsp` pattern).
-fn detect_frame_pointer(func: &Function) -> bool {
+/// Detect the frame pointer style used by a function.
+fn detect_frame_pointer_style(func: &Function) -> FramePointerStyle {
     for block in &func.blocks {
         for insn in &block.instructions {
             let code = insn.instruction.code();
-            // mov rbp, rsp can be encoded as either Mov_rm64_r64 or Mov_r64_rm64
+            // mov rbp, rsp
             if (code == Code::Mov_rm64_r64 || code == Code::Mov_r64_rm64)
                 && insn.instruction.op0_register() == Register::RBP
                 && insn.instruction.op1_register() == Register::RSP
             {
-                return true;
+                return FramePointerStyle::MovRbpRsp;
+            }
+            // lea rbp, [rsp+N]
+            if matches!(code, Code::Lea_r64_m | Code::Lea_r32_m)
+                && insn.instruction.op0_register() == Register::RBP
+                && insn.instruction.memory_base() == Register::RSP
+                && insn.instruction.memory_index() == Register::None
+            {
+                return FramePointerStyle::LeaRbpRsp;
             }
         }
     }
-    false
+    FramePointerStyle::None
 }
 
 /// Check if a function uses a given register (or any sub-register of it).

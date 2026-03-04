@@ -10,9 +10,10 @@ use crate::ir::instruction::IrInsn;
 /// Dead code insertion pass: adds unreachable blocks with realistic-looking
 /// instructions, connected via opaque predicates that never branch.
 ///
-/// Technique: prepend `pushfq; cmp rsp, 0; je dead_block; popfq` to a block.
-/// RSP is never zero so the je is never taken. pushfq/popfq preserve FLAGS,
-/// and cmp only reads RSP without modifying it.
+/// Technique: prepend `cmp rsp, 0; je dead_block` to a block.
+/// RSP is never zero so the je is never taken. This clobbers FLAGS, which
+/// is safe because block entry points in compiler-generated code don't
+/// depend on FLAGS from predecessor blocks.
 pub struct DeadCodeInsertion;
 
 impl ObfuscationPass for DeadCodeInsertion {
@@ -62,25 +63,31 @@ impl ObfuscationPass for DeadCodeInsertion {
                 .push(IrInsn::synthetic(trap, ctx.alloc_insn_id()));
 
             // Build opaque predicate sequence:
-            //   pushfq              ; save FLAGS
             //   cmp rsp, 0          ; RSP is never 0 → ZF=0
             //   je dead_block       ; never taken (ZF=0)
-            //   popfq               ; restore FLAGS
-            let pushfq = Instruction::with(Code::Pushfq);
             let cmp = Instruction::with2(Code::Cmp_rm64_imm8, Register::RSP, 0i32).unwrap();
             let je = Instruction::with_branch(Code::Je_rel32_64, dead_block_ip).unwrap();
-            let popfq = Instruction::with(Code::Popfq);
 
             let predicate_insns = vec![
-                IrInsn::synthetic(pushfq, ctx.alloc_insn_id()),
                 IrInsn::synthetic(cmp, ctx.alloc_insn_id()),
                 IrInsn::synthetic(je, ctx.alloc_insn_id()),
-                IrInsn::synthetic(popfq, ctx.alloc_insn_id()),
             ];
 
-            // Prepend to the block
+            // Prepend to the block, preserving the original first instruction's IP
+            // so that CFF and other passes can still match branch targets to this block.
+            let original_first_ip = func.blocks[i]
+                .instructions
+                .first()
+                .map(|insn| insn.instruction.ip())
+                .unwrap_or(0);
+
             let existing: Vec<IrInsn> = func.blocks[i].instructions.drain(..).collect();
             func.blocks[i].instructions = predicate_insns;
+            if original_first_ip != 0 {
+                if let Some(first) = func.blocks[i].instructions.first_mut() {
+                    first.instruction.set_ip(original_first_ip);
+                }
+            }
             func.blocks[i].instructions.extend(existing);
 
             dead_blocks.push(dead_block);
