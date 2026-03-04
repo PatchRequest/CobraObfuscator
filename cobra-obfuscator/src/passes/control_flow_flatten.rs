@@ -88,6 +88,7 @@ impl ObfuscationPass for ControlFlowFlatten {
                 .map(|i| i.instruction.ip())
                 .find(|&ip| ip != 0)
                 .unwrap_or(0);
+
             block_mappings.push(BlockMapping {
                 state: state_numbers[i],
                 insns,
@@ -372,8 +373,11 @@ enum FramePointerStyle {
     None,
     /// `mov rbp, rsp` style: RBP is 16 lower, positive RBP displacements need +16.
     MovRbpRsp,
-    /// `lea rbp, [rsp+N]` style: only that LEA instruction needs its displacement +16.
-    /// All other RSP/RBP-relative accesses are self-consistent and need no adjustment.
+    /// `lea rbp, [rsp+N]` style: RBP shifts down by 16 (same as MovRbpRsp), so positive
+    /// RBP displacements (shadow space / params) need +16. Negative displacements (locals)
+    /// are fine because the function's local area also shifts down. The LEA itself is NOT
+    /// adjusted — RBP naturally moves 16 lower, preserving the distance to locals while
+    /// positive-disp adjustments fix parameter access.
     LeaRbpRsp,
 }
 
@@ -383,19 +387,18 @@ enum FramePointerStyle {
 /// the shifted RSP is self-consistent for locals, call argument setup, and other
 /// RSP-relative operations. The callee's RSP is also shifted, so call args match.
 ///
-/// For `mov rbp, rsp` frame pointers: RBP is 16 lower, so positive RBP offsets
-/// (accessing caller's frame / shadow space) need +16. Negative offsets (locals)
-/// are fine since they're relative to wherever RBP ends up.
-///
-/// For `lea rbp, [rsp+N]` frame pointers: only that specific LEA needs +16 on its
-/// displacement so RBP ends up at the same position as without CFF. Then all
-/// RBP-relative accesses (both positive and negative) are correct.
+/// For both `mov rbp, rsp` and `lea rbp, [rsp+N]` frame pointers: RBP naturally
+/// shifts 16 bytes lower due to the CFF preamble. Positive RBP offsets (accessing
+/// caller's shadow space / parameters) need +16 to compensate. Negative offsets
+/// (locals) are fine since they're relative to wherever RBP ends up, and the
+/// function's local area also shifted down. The LEA instruction is NOT adjusted —
+/// letting RBP shift preserves the distance between RBP and locals/saved registers.
 fn adjust_stack_displacements(instr: &mut Instruction, fp_style: &FramePointerStyle) {
     const STACK_ADJUSTMENT: u64 = 16;
 
     match fp_style {
         FramePointerStyle::None => return,
-        FramePointerStyle::MovRbpRsp => {
+        FramePointerStyle::MovRbpRsp | FramePointerStyle::LeaRbpRsp => {
             // Adjust positive RBP-relative displacements only
             for op_idx in 0..instr.op_count() {
                 if instr.op_kind(op_idx) == iced_x86::OpKind::Memory {
@@ -413,24 +416,6 @@ fn adjust_stack_displacements(instr: &mut Instruction, fp_style: &FramePointerSt
                         }
                     }
                     break;
-                }
-            }
-        }
-        FramePointerStyle::LeaRbpRsp => {
-            // Only adjust `lea rbp, [rsp+N]` instructions
-            let code = instr.code();
-            if matches!(code, Code::Lea_r64_m | Code::Lea_r32_m)
-                && instr.op0_register() == Register::RBP
-                && instr.memory_base() == Register::RSP
-                && instr.memory_index() == Register::None
-            {
-                let new_disp = instr.memory_displacement64().wrapping_add(STACK_ADJUSTMENT);
-                instr.set_memory_displacement64(new_disp);
-                let new_disp_signed = new_disp as i64;
-                if instr.memory_displ_size() <= 1
-                    && !((-128..=127).contains(&new_disp_signed))
-                {
-                    instr.set_memory_displ_size(4);
                 }
             }
         }
