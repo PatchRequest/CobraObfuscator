@@ -1,7 +1,7 @@
 import hashlib
 import random
 import string
-
+from dispatcher import *
 class Code:
     def __init__(self):
         self.instructions = []
@@ -30,73 +30,13 @@ class Code:
         for label in self.labels:
             self.renameLabel(label)
 
-    def generate_dispatchers(self,num_dispatchers=2, proxy_chance=0.5):
-        labels = self.labels
-        label_to_dispatch_info = {}
-        dispatchers = []
-        proxies = []
-        dispatcher_labels = [f"dispatcher_{i}" for i in range(num_dispatchers)]
-        
-        # Group labels into dispatchers
-        grouped_labels = [[] for _ in range(num_dispatchers)]
-        for label in labels:
-            dispatcher_idx = random.randint(0, num_dispatchers - 1)
-            grouped_labels[dispatcher_idx].append(label)
-        
-        code_lines = []
-        
-        for i, dispatcher in enumerate(dispatcher_labels):
-            code_lines.append(f"{dispatcher}:")
-            used_eax = set()
-            for label in grouped_labels[i]:
-                # Random EAX value that hasn't been used in this dispatcher
-                eax_val = random.randint(1, 100)
-                while eax_val in used_eax:
-                    eax_val = random.randint(1, 100)
-                used_eax.add(eax_val)
+    def generate_dispatchers(self):
+        pass
+    
+    def swapCallToDispatcher(self):
+        pass
 
-                # Decide if proxy is used
-                if random.random() < proxy_chance:
-                    proxy_label = ''.join(random.choices(string.ascii_lowercase, k=12))
-                    code_lines.append(f"    cmp eax, {eax_val}")
-                    code_lines.append(f"    je {proxy_label}")
-                    proxies.append((proxy_label, label))
-                    label_to_dispatch_info[label] = (dispatcher, eax_val)
-                else:
-                    code_lines.append(f"    cmp eax, {eax_val}")
-                    code_lines.append(f"    je {label}")
-                    label_to_dispatch_info[label] = (dispatcher, eax_val)
-            code_lines.append(f"    ret\n")
 
-        # Add proxy functions
-        for proxy_label, target_label in proxies:
-            code_lines.append(f"{proxy_label}:")
-            code_lines.append(f"    jmp {target_label}\n")
-
-        for label in label_to_dispatch_info.keys():
-            self.swapCallToDispatcher(label,label_to_dispatch_info)
-
-        for line in code_lines:
-            self.appendInstruction(Instruction(line))
-        #return label_to_dispatch_info
-
-    def swapCallToDispatcher(self,label,info_table):
-        #print(f"[+] Swapping Calls to Dispatcher for {label} ")
-        insertions = []
-
-        for idx, ins in enumerate(self.instructions):
-            if label in ins.rawLine and not ins.is_label:
-                insertions.append((idx, ins))
-
-        # Apply in reverse to keep indices stable
-        for idx, ins in reversed(insertions):
-            code_lines = [
-                Instruction("push eax"),
-                Instruction(f"mov eax, {info_table[label][1]}"),
-                Instruction(f"{ins.op} {info_table[label][0]}"),
-                Instruction("pop eax")
-            ]
-            self.instructions[idx:idx+1] = code_lines
 
                 
     def saveToFile(self):

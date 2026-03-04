@@ -1,0 +1,13 @@
+[package]
+name = "cobra-obfuscator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iced-x86 = { version = "1.21", features = ["decoder", "encoder", "block_encoder", "code_asm", "instr_info", "op_code_info"] }
+object = { version = "0.36", features = ["read", "write", "coff", "pe"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+rand = "0.8"
