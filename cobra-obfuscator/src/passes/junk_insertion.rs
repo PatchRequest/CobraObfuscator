@@ -48,9 +48,11 @@ fn alloc_id(next_id: &mut u64) -> u64 {
 }
 
 fn generate_junk(rng: &mut StdRng, next_id: &mut u64) -> Vec<IrInsn> {
-    // NOTE: push/pop pairs are intentionally excluded because they temporarily
-    // change RSP, which breaks CFF's RSP-relative displacement adjustment.
-    let choice = rng.gen_range(0..4);
+    // NOTE: push/pop pairs are excluded because they temporarily change RSP,
+    // which breaks CFF's RSP-relative displacement adjustment.
+    // Memory operands (lea, mov) are excluded because CFF adjusts RSP/RBP-
+    // relative displacements and synthetic memory operands cause issues.
+    let choice = rng.gen_range(0..3);
     match choice {
         0 => {
             let nop = Instruction::with(Code::Nopd);
@@ -69,16 +71,6 @@ fn generate_junk(rng: &mut StdRng, next_id: &mut u64) -> Vec<IrInsn> {
         2 => {
             let nop = Instruction::with(Code::Nopq);
             vec![IrInsn::synthetic(nop, alloc_id(next_id))]
-        }
-        3 => {
-            // lea reg, [reg] (identity operation, doesn't change reg or flags)
-            let reg = pick_volatile_reg(rng);
-            if let Ok(lea) = Instruction::with2(Code::Lea_r64_m, reg, iced_x86::MemoryOperand::new(reg, Register::None, 1, 0, 8, false, Register::None)) {
-                vec![IrInsn::synthetic(lea, alloc_id(next_id))]
-            } else {
-                let nop = Instruction::with(Code::Nopd);
-                vec![IrInsn::synthetic(nop, alloc_id(next_id))]
-            }
         }
         _ => unreachable!(),
     }
