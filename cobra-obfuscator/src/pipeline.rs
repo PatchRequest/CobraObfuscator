@@ -144,6 +144,25 @@ pub struct ObfuscatedFunction {
 /// Minimum function size to obfuscate (need room for jmp rel32 trampoline).
 const MIN_FUNCTION_SIZE: u32 = 5;
 
+/// Check if a PE function contains indirect branches (jump tables, computed gotos).
+/// Such functions cannot be safely trampolined because the jump table data in .rdata
+/// still points to the original .text addresses which get overwritten.
+fn pe_function_has_indirect_branches(func: &PeFunction) -> bool {
+    let mut decoder = iced_x86::Decoder::with_ip(
+        64,
+        &func.code,
+        func.start_rva as u64,
+        iced_x86::DecoderOptions::NONE,
+    );
+    while decoder.can_decode() {
+        let insn = decoder.decode();
+        if insn.flow_control() == iced_x86::FlowControl::IndirectBranch {
+            return true;
+        }
+    }
+    false
+}
+
 /// Run the obfuscation pipeline on PE functions.
 pub fn run_pe_pipeline(
     functions: &[PeFunction],
@@ -188,6 +207,14 @@ pub fn run_pe_pipeline(
                 func.name,
                 func.size(),
                 MIN_FUNCTION_SIZE
+            );
+            continue;
+        }
+
+        if pe_function_has_indirect_branches(func) {
+            log::info!(
+                "Skipping function {} — has indirect branches (jump table)",
+                func.name
             );
             continue;
         }

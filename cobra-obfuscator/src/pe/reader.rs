@@ -297,18 +297,41 @@ fn identify_user_functions(
         }
     };
 
-    // BFS from main to find all reachable user functions
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back(main_rva);
+    // Build the set of CRT startup's direct call targets (excluding main).
+    // In MinGW, main() calls __main() which is a CRT function that initializes
+    // global constructors. We must NOT follow calls into CRT startup targets
+    // during BFS from main, otherwise we'd trampoline CRT functions and break them.
+    let crt_targets: std::collections::HashSet<u32> = call_targets
+        .iter()
+        .filter(|t| func_rvas.contains(t) && **t != main_rva)
+        .copied()
+        .collect();
+
+    log::debug!("CRT startup direct targets (excluded from user BFS): {:?}",
+        crt_targets.iter().map(|r| format!("0x{:x}", r)).collect::<Vec<_>>());
+
+    // BFS from main to find all reachable user functions,
+    // but do NOT follow calls to CRT startup's direct targets.
+    let mut queue: std::collections::VecDeque<(u32, u32)> = std::collections::VecDeque::new();
+    queue.push_back((main_rva, 0));
     user_rvas.insert(main_rva);
 
-    while let Some(rva) = queue.pop_front() {
+    // Limit BFS depth for safety: deep callees are likely library internals
+    const MAX_BFS_DEPTH: u32 = 3;
+
+    while let Some((rva, depth)) = queue.pop_front() {
+        if depth >= MAX_BFS_DEPTH {
+            continue;
+        }
         if let Some(func) = func_by_rva.get(&rva) {
             let targets = find_all_e8_targets(&func.code, func.start_rva);
             for target in targets {
-                if func_rvas.contains(&target) && !user_rvas.contains(&target) {
+                if func_rvas.contains(&target)
+                    && !user_rvas.contains(&target)
+                    && !crt_targets.contains(&target)
+                {
                     user_rvas.insert(target);
-                    queue.push_back(target);
+                    queue.push_back((target, depth + 1));
                 }
             }
         }
