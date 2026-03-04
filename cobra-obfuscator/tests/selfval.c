@@ -14,6 +14,7 @@ void NTAPI tls_callback(PVOID DllHandle, DWORD dwReason, PVOID Reserved) {
 }
 
 #ifdef _MSC_VER
+#pragma comment(linker, "/INCLUDE:_tls_used")
 #pragma section(".CRT$XLB", read)
 __declspec(allocate(".CRT$XLB")) PIMAGE_TLS_CALLBACK _tls_cb = tls_callback;
 #else

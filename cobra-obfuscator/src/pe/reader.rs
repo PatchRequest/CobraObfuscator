@@ -266,7 +266,50 @@ fn identify_user_functions(
     // Find main: among all E8 call targets from CRT startup, main is the one
     // that reaches the most local functions via BFS. CRT init functions mostly
     // call imports (indirect), while main calls user functions (direct E8).
-    let call_targets = find_all_e8_targets(&crt_startup.code, crt_startup_rva);
+    //
+    // MSVC note: __scrt_common_main_seh is split across multiple .pdata entries
+    // (SEH chaining), so the function's code bytes may be truncated. If we find
+    // no E8 targets, extend the scan to include consecutive .pdata entries that
+    // immediately follow the startup function.
+    let mut call_targets = find_all_e8_targets(&crt_startup.code, crt_startup_rva);
+
+    if call_targets.is_empty() {
+        // MSVC fallback: __scrt_common_main_seh is split across multiple .pdata
+        // entries (SEH chaining). Extend the scan to include a few nearby entries
+        // (invoke_main is typically right after the startup function).
+        // Limit to ~1KB total to avoid absorbing unrelated CRT functions.
+        let startup_end = crt_startup_rva + crt_startup.code.len() as u32;
+        let mut extended_code = crt_startup.code.clone();
+        let mut current_end = startup_end;
+        const MAX_EXTENSION: usize = 1024;
+
+        let mut sorted_funcs: Vec<&PeFunction> = functions.iter().collect();
+        sorted_funcs.sort_by_key(|f| f.start_rva);
+
+        for func in &sorted_funcs {
+            if extended_code.len() >= MAX_EXTENSION {
+                break;
+            }
+            if func.start_rva >= current_end && func.start_rva <= current_end + 64 {
+                let gap = (func.start_rva - current_end) as usize;
+                extended_code.extend(std::iter::repeat(0xCC).take(gap));
+                extended_code.extend_from_slice(&func.code);
+                current_end = func.start_rva + func.code.len() as u32;
+            } else if func.start_rva > current_end + 64 {
+                break;
+            }
+        }
+
+        if extended_code.len() > crt_startup.code.len() {
+            log::info!(
+                "Extended CRT startup scan: {} -> {} bytes (MSVC SEH chain)",
+                crt_startup.code.len(),
+                extended_code.len()
+            );
+            call_targets = find_all_e8_targets(&extended_code, crt_startup_rva);
+        }
+    }
+
     let candidates: Vec<u32> = call_targets
         .iter()
         .filter(|t| func_rvas.contains(t) && **t != entry_rva && **t != crt_startup_rva)

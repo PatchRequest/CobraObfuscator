@@ -91,10 +91,10 @@ The binary lands in `target/release/cobra-obfuscator.exe`.
 
 ## Test Suite
 
-The test matrix covers **6,600 configurations** across:
+The test matrix covers **8,580 configurations** across:
 
-- **2 compilers** — GCC (MinGW), Clang (MinGW target)
-- **5 optimization levels** — `-O0`, `-O1`, `-O2`, `-Os`, `-O3`
+- **3 compilers** — GCC (MinGW), Clang (MinGW target), MSVC (cl.exe)
+- **5 optimization levels** — `-O0`, `-O1`, `-O2`, `-Os`, `-O3` (GCC/Clang) + `/Od`, `/O1`, `/O2` (MSVC)
 - **6 test programs** — minimal, medium, loops, recursion, switch_heavy, selfval
 - **11 pass combinations** — all passes, each pass solo, pairwise combos, triple combos
 - **10 seeds** per configuration
@@ -102,7 +102,7 @@ The test matrix covers **6,600 configurations** across:
 Test programs exercise: deep nesting, mutual recursion, Ackermann function, binary exponentiation, bubble sort, state machines, large/sparse/nested switch statements, heap allocation, TLS callbacks, threading, VEH, and WinAPI calls.
 
 ```bash
-# Run the full matrix (requires GCC and/or Clang)
+# Run the full matrix (auto-detects available compilers)
 cd tests && bash run_matrix.sh
 ```
 

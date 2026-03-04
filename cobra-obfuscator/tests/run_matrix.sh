@@ -2,8 +2,8 @@
 # ============================================================================
 # Cobra Obfuscator — Full Test Matrix
 # ============================================================================
-# Compilers: GCC (MinGW), Clang (MinGW target)
-# Opt levels: -O0, -O1, -O2, -Os, -O3
+# Compilers: GCC (MinGW), Clang (MinGW target), MSVC (cl.exe)
+# Opt levels: -O0, -O1, -O2, -Os, -O3 (GCC/Clang); /Od, /O1, /O2 (MSVC)
 # Test programs: minimal, medium, loops, recursion, switch_heavy, selfval
 # Pass combos: all, cff-only, junk-only, dead-only, insn-only, cff+junk, etc.
 # Seeds: 1..10
@@ -33,6 +33,34 @@ SKIPPED=0
 GCC="$(which gcc 2>/dev/null || true)"
 CLANG="$(which clang 2>/dev/null || true)"
 
+# MSVC: detect via vcvarsall.bat and create a compile wrapper
+MSVC=""
+VCVARSALL=""
+for vs_path in \
+    "/c/Program Files/Microsoft Visual Studio/2022/Community" \
+    "/c/Program Files/Microsoft Visual Studio/2022/Professional" \
+    "/c/Program Files/Microsoft Visual Studio/2022/Enterprise" \
+    "/c/Program Files (x86)/Microsoft Visual Studio/2019/Community" \
+    "/c/Program Files (x86)/Microsoft Visual Studio/2019/Professional"; do
+    if [ -f "$vs_path/VC/Auxiliary/Build/vcvarsall.bat" ]; then
+        # Convert to Windows path
+        VCVARSALL="$(cd "$vs_path/VC/Auxiliary/Build" && pwd -W)/vcvarsall.bat"
+        break
+    fi
+done
+
+if [ -n "$VCVARSALL" ]; then
+    # Create a bat wrapper for MSVC compilation
+    MSVC_BAT="$WORK_DIR/msvc_compile.bat"
+    mkdir -p "$WORK_DIR"
+    cat > "$MSVC_BAT" << BATEOF
+@echo off
+call "$VCVARSALL" x64 >nul 2>&1
+cl.exe /nologo %*
+BATEOF
+    MSVC="msvc"
+fi
+
 echo "============================================"
 echo "  Cobra Obfuscator — Test Matrix Runner"
 echo "============================================"
@@ -40,11 +68,22 @@ echo ""
 echo "Compilers:"
 [ -n "$GCC" ]   && echo "  GCC:   $GCC"   || echo "  GCC:   NOT FOUND"
 [ -n "$CLANG" ] && echo "  Clang: $CLANG" || echo "  Clang: NOT FOUND"
+[ -n "$MSVC" ]  && echo "  MSVC:  $VCVARSALL" || echo "  MSVC:  NOT FOUND"
 echo ""
 
 # ---- Setup ----
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/bins" "$WORK_DIR/obf"
+
+# Re-create MSVC bat wrapper after rm -rf
+if [ -n "$VCVARSALL" ]; then
+    MSVC_BAT="$WORK_DIR/msvc_compile.bat"
+    cat > "$MSVC_BAT" << BATEOF
+@echo off
+call "$VCVARSALL" x64 >nul 2>&1
+cl.exe /nologo %*
+BATEOF
+fi
 
 ALL_TESTS="minimal medium loops recursion switch_heavy selfval"
 
@@ -77,13 +116,27 @@ compile_test() {
         clang)
             "$CLANG" --target=x86_64-w64-mingw32 $opt -o "$out" "$src" -lkernel32 2>/dev/null
             ;;
+        msvc)
+            # Convert paths to Windows format for cmd.exe
+            local win_out win_src
+            win_out="$(cygpath -w "$out" 2>/dev/null || echo "$out")"
+            win_src="$(cygpath -w "$src" 2>/dev/null || echo "$src")"
+            local win_bat
+            win_bat="$(cygpath -w "$MSVC_BAT" 2>/dev/null || echo "$MSVC_BAT")"
+            cmd.exe //C "$win_bat /Fe:$win_out $opt $win_src" >/dev/null 2>&1
+            # cl.exe leaves .obj files in current dir — clean up
+            local base
+            base="$(basename "$src" .c)"
+            rm -f "${base}.obj" 2>/dev/null
+            ;;
     esac
 }
 
 # ---- Run one test ----
 run_test() {
     local compiler_name="$1" opt="$2" test_name="$3" pass_label="$4" disable_flags="$5" seed="$6" input_exe="$7"
-    local out_name="${compiler_name}_${opt//-/}_${test_name}_${pass_label}_s${seed}"
+    local safe_opt="${opt#-}"; safe_opt="${safe_opt#/}"
+    local out_name="${compiler_name}_${safe_opt}_${test_name}_${pass_label}_s${seed}"
     local out_exe="$WORK_DIR/obf/${out_name}.exe"
 
     TOTAL=$((TOTAL + 1))
@@ -117,10 +170,12 @@ run_test() {
 declare -A COMPILER_OPTS
 COMPILER_OPTS[gcc]="-O0 -O1 -O2 -Os -O3"
 COMPILER_OPTS[clang]="-O0 -O1 -O2 -Os -O3"
+COMPILER_OPTS[msvc]="/Od /O1 /O2"
 
 AVAILABLE_COMPILERS=""
 [ -n "$GCC" ]   && AVAILABLE_COMPILERS="$AVAILABLE_COMPILERS gcc"
 [ -n "$CLANG" ] && AVAILABLE_COMPILERS="$AVAILABLE_COMPILERS clang"
+[ -n "$MSVC" ]  && AVAILABLE_COMPILERS="$AVAILABLE_COMPILERS msvc"
 
 for compiler in $AVAILABLE_COMPILERS; do
     echo ""
@@ -131,7 +186,8 @@ for compiler in $AVAILABLE_COMPILERS; do
 
         for test_name in $ALL_TESTS; do
             src="$SCRIPT_DIR/${test_name}.c"
-            bin="$WORK_DIR/bins/${compiler}_${opt//-/}_${test_name}.exe"
+            safe_opt="${opt#-}"; safe_opt="${safe_opt#/}"
+            bin="$WORK_DIR/bins/${compiler}_${safe_opt}_${test_name}.exe"
 
             if ! compile_test "$compiler" "$src" "$opt" "$bin" 2>/dev/null; then
                 echo -e "    ${YELLOW}SKIP${NC} $test_name — compile failed"
@@ -188,6 +244,8 @@ if [ "$FAILED" -gt 0 ]; then
 fi
 
 # ---- Summary file ----
+ALL_OPT_LEVELS="-O0 -O1 -O2 -Os -O3 /Od /O1 /O2"
+
 {
     echo "============================================"
     echo "  Cobra Obfuscator Test Matrix Summary"
@@ -207,7 +265,7 @@ fi
     echo ""
 
     echo "--- By Optimization Level ---"
-    for opt in -O0 -O1 -O2 -Os -O3; do
+    for opt in $ALL_OPT_LEVELS; do
         p=$(grep ",$opt," "$RESULTS_FILE" | grep -c ",PASS," || true)
         f=$(grep ",$opt," "$RESULTS_FILE" | grep ",FAIL,\|OBF_ERROR" | grep -vc "COMPILE_FAIL\|ORIG_FAIL" || true)
         s=$(grep ",$opt," "$RESULTS_FILE" | grep -c "COMPILE_FAIL\|ORIG_FAIL" || true)
