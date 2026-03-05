@@ -1,0 +1,10 @@
+[package]
+name = "rust_crypto"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = 2
+
+[profile.dev]
+opt-level = 0
