@@ -248,6 +248,111 @@ pub fn run_pe_pipeline(
     Ok(results)
 }
 
+/// Run the obfuscation pipeline on PE functions in-place (encode at original VA).
+///
+/// Unlike `run_pe_pipeline`, this encodes each function at its original virtual address
+/// so that PC-to-metadata mappings (e.g. Go's .gopclntab) remain valid.
+pub fn run_pe_pipeline_inplace(
+    functions: &[PeFunction],
+    image_base: u64,
+    config: &ObfuscatorConfig,
+) -> Result<Vec<ObfuscatedFunction>> {
+    let seed = config.seed.unwrap_or_else(|| rand::random());
+    let rng = StdRng::seed_from_u64(seed);
+    log::info!("PE in-place pipeline using seed: {}", seed);
+
+    // In-place mode: exclude size-increasing passes (CFF, junk-insertion)
+    // since the obfuscated code must fit in the original function's space.
+    const SIZE_INCREASING_PASSES: &[&str] = &["control-flow-flatten", "junk-insertion"];
+
+    let all_passes = passes::default_pass_list();
+    let enabled_passes: Vec<Box<dyn ObfuscationPass>> = all_passes
+        .into_iter()
+        .filter(|p| !config.disabled_passes.contains(p.name()))
+        .filter(|p| !SIZE_INCREASING_PASSES.contains(&p.name()))
+        .collect();
+
+    log::info!(
+        "In-place enabled passes: {:?}",
+        enabled_passes.iter().map(|p| p.name()).collect::<Vec<_>>()
+    );
+
+    let mut ctx = PassContext {
+        rng,
+        next_block_id: 10000,
+        next_insn_id: 100000,
+        junk_density: config.junk_density,
+    };
+
+    let mut results = Vec::new();
+    let mut patched = 0u32;
+    let mut skipped_size = 0u32;
+
+    for func in functions {
+        if func.is_runtime {
+            log::info!("Skipping CRT/runtime function {}", func.name);
+            continue;
+        }
+
+        if func.size() < MIN_FUNCTION_SIZE {
+            log::warn!(
+                "Skipping function {} (size {} < {})",
+                func.name,
+                func.size(),
+                MIN_FUNCTION_SIZE
+            );
+            continue;
+        }
+
+        if pe_function_has_indirect_branches(func) {
+            log::info!(
+                "Skipping function {} — has indirect branches",
+                func.name
+            );
+            continue;
+        }
+
+        // Encode at the ORIGINAL VA so PCs stay in the original range
+        let source_va = image_base + func.start_rva as u64;
+
+        match process_pe_function(func, image_base, source_va, &enabled_passes, &mut ctx, config) {
+            Ok(code) => {
+                if code.len() > func.size() as usize {
+                    log::debug!(
+                        "  {} grew ({} > {}), skipping in-place",
+                        func.name, code.len(), func.size()
+                    );
+                    skipped_size += 1;
+                    continue;
+                }
+                log::info!(
+                    "  {} -> {} bytes (was {})",
+                    func.name,
+                    code.len(),
+                    func.size()
+                );
+                patched += 1;
+                results.push(ObfuscatedFunction {
+                    original_rva: func.start_rva,
+                    original_size: func.size(),
+                    code,
+                    name: func.name.clone(),
+                });
+            }
+            Err(e) => {
+                log::warn!("Skipping function {} due to error: {}", func.name, e);
+            }
+        }
+    }
+
+    log::info!(
+        "In-place summary: {} patched, {} skipped (grew too large)",
+        patched, skipped_size
+    );
+
+    Ok(results)
+}
+
 /// Process a single PE function through decode → passes → encode.
 fn process_pe_function(
     func: &PeFunction,

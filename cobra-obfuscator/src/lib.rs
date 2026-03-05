@@ -78,3 +78,30 @@ pub fn obfuscate_pe(input: &[u8], config: &ObfuscatorConfig) -> Result<Vec<u8>> 
     log::info!("Output PE: {} bytes", output.len());
     Ok(output)
 }
+
+/// Read a PE binary, obfuscate functions in-place (no new section), and return the patched PE.
+///
+/// This mode writes obfuscated code back at the original function addresses, preserving
+/// PC-to-metadata mappings such as Go's .gopclntab. Functions that grow too large are skipped.
+pub fn obfuscate_pe_inplace(input: &[u8], config: &ObfuscatorConfig) -> Result<Vec<u8>> {
+    let pe_file = pe::reader::read_pe(input).context("Failed to read PE input")?;
+
+    log::info!(
+        "Parsed PE (in-place mode): image_base=0x{:x}, {} sections, {} functions",
+        pe_file.image_base, pe_file.sections.len(), pe_file.functions.len(),
+    );
+
+    let obfuscated = pipeline::run_pe_pipeline_inplace(
+        &pe_file.functions,
+        pe_file.image_base,
+        config,
+    ).context("PE in-place pipeline failed")?;
+
+    log::info!("Obfuscated {} functions (in-place)", obfuscated.len());
+
+    let output = pe::writer::write_pe_inplace(&pe_file, &obfuscated)
+        .context("Failed to write PE output (in-place)")?;
+
+    log::info!("Output PE: {} bytes", output.len());
+    Ok(output)
+}

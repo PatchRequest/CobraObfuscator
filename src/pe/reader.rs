@@ -5,6 +5,12 @@ use object::Object;
 use super::pdata;
 use super::types::{PeFile, PeFunction, PeSectionInfo};
 
+/// Detect if a PE file is a Go binary (has Go build ID or go.buildid marker).
+pub fn is_go_binary(data: &[u8]) -> bool {
+    // Go embeds "Go build ID:" or "go.buildid" in every binary
+    data.windows(12).any(|w| w == b"Go build ID:" || w == b"go.buildid\x00\x00")
+}
+
 /// Parse a PE file from raw bytes.
 pub fn read_pe(data: &[u8]) -> Result<PeFile> {
     // Validate MZ header

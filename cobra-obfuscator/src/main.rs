@@ -70,7 +70,12 @@ fn main() -> Result<()> {
     };
 
     let output_data = if is_pe {
-        cobra_obfuscator::obfuscate_pe(&input_data, &config)?
+        if cobra_obfuscator::pe::reader::is_go_binary(&input_data) {
+            log::info!("Detected Go binary — using in-place obfuscation mode");
+            cobra_obfuscator::obfuscate_pe_inplace(&input_data, &config)?
+        } else {
+            cobra_obfuscator::obfuscate_pe(&input_data, &config)?
+        }
     } else {
         cobra_obfuscator::obfuscate(&input_data, &config)?
     };

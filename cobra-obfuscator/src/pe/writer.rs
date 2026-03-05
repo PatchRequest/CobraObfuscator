@@ -190,3 +190,53 @@ pub fn write_pe(
 
     Ok(output)
 }
+
+/// Write obfuscated code back in-place at original function addresses.
+///
+/// No new section is added. Functions that grew too large are skipped.
+/// This mode preserves PC-to-metadata mappings (e.g. Go's .gopclntab).
+pub fn write_pe_inplace(
+    pe: &PeFile,
+    obfuscated: &[ObfuscatedFunction],
+) -> Result<Vec<u8>> {
+    let mut output = pe.data.clone();
+    let mut patched_count = 0;
+
+    for func in obfuscated {
+        if func.code.len() > func.original_size as usize {
+            log::warn!(
+                "In-place: skipping {} — obfuscated size {} > original {}",
+                func.name, func.code.len(), func.original_size
+            );
+            continue;
+        }
+
+        let file_offset = pe.sections.iter()
+            .find_map(|s| s.rva_to_offset(func.original_rva))
+            .with_context(|| format!("Cannot find file offset for RVA 0x{:x}", func.original_rva))?;
+
+        // Write obfuscated code
+        output[file_offset..file_offset + func.code.len()]
+            .copy_from_slice(&func.code);
+
+        // Pad remaining with int3
+        let remaining = func.original_size as usize - func.code.len();
+        for i in 0..remaining {
+            output[file_offset + func.code.len() + i] = 0xCC;
+        }
+
+        patched_count += 1;
+    }
+
+    if patched_count == 0 {
+        bail!("No functions could be obfuscated in-place (all grew too large)");
+    }
+
+    // Zero checksum
+    output[pe.checksum_offset..pe.checksum_offset + 4].copy_from_slice(&0u32.to_le_bytes());
+
+    log::info!("In-place: patched {} functions (skipped {})",
+        patched_count, obfuscated.len() - patched_count);
+
+    Ok(output)
+}

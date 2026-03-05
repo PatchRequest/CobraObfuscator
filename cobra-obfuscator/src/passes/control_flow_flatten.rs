@@ -45,6 +45,27 @@ impl ObfuscationPass for ControlFlowFlatten {
             return Ok(false);
         }
 
+        // Skip recursive functions — CFF adds 16 bytes of stack frame overhead per call,
+        // which compounds in recursive functions and can cause stack overflows (especially
+        // in debug builds with large unoptimized stack frames).
+        if function_is_recursive(func) {
+            log::debug!("Skipping CFF for {} — recursive function", func.name);
+            return Ok(false);
+        }
+
+        // Skip functions with non-trivial stack frames (> 128 bytes). CFF adds 16 bytes
+        // per frame, and deep call chains of large-frame functions (common in Rust/Go
+        // debug builds with unoptimized frames) can overflow the stack.
+        if let Some(frame_size) = detect_stack_frame_size(func) {
+            if frame_size > 128 {
+                log::debug!(
+                    "Skipping CFF for {} — large stack frame ({} bytes)",
+                    func.name, frame_size
+                );
+                return Ok(false);
+            }
+        }
+
         let state_reg = Register::R15;
         let state_reg32 = Register::R15D;
         let num_blocks = func.blocks.len();
@@ -489,6 +510,47 @@ fn function_has_indirect_branches(func: &Function) -> bool {
         for insn in &block.instructions {
             let flow = insn.instruction.flow_control();
             if flow == iced_x86::FlowControl::IndirectBranch {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if a function is self-recursive (calls its own entry address).
+/// Detect the stack frame size from the prologue's `sub rsp, N` instruction.
+fn detect_stack_frame_size(func: &Function) -> Option<u64> {
+    let entry = func.blocks.first()?;
+    // Look at the first few instructions for `sub rsp, imm`
+    for insn in entry.instructions.iter().take(10) {
+        let i = &insn.instruction;
+        if i.mnemonic() == iced_x86::Mnemonic::Sub
+            && i.op0_register() == Register::RSP
+            && i.op1_kind() == iced_x86::OpKind::Immediate32to64
+        {
+            return Some(i.immediate32to64() as u64);
+        }
+    }
+    None
+}
+
+fn function_is_recursive(func: &Function) -> bool {
+    // Find the function's entry IP
+    let entry_ip = func.blocks.first()
+        .and_then(|b| b.instructions.iter().find(|i| i.instruction.ip() != 0))
+        .map(|i| i.instruction.ip());
+
+    let entry_ip = match entry_ip {
+        Some(ip) => ip,
+        None => return false,
+    };
+
+    for block in &func.blocks {
+        for insn in &block.instructions {
+            if insn.instruction.mnemonic() == iced_x86::Mnemonic::Call
+                && insn.instruction.op0_kind() == iced_x86::OpKind::NearBranch64
+                && insn.instruction.near_branch64() == entry_ip
+            {
                 return true;
             }
         }
