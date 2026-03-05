@@ -181,7 +181,7 @@ impl std::fmt::Display for ObfuscationStats {
         if self.inplace {
             write!(f, "  Mode:                in-place")?;
         } else {
-            write!(f, "  Mode:                trampoline")?;
+            write!(f, "  Mode:                scatter")?;
         }
         Ok(())
     }
@@ -198,6 +198,21 @@ pub struct ObfuscatedFunction {
     pub code: Vec<u8>,
     /// Function name.
     pub name: String,
+}
+
+/// An obfuscated PE function that retains its IR for re-encoding at a different VA.
+#[derive(Debug, Clone)]
+pub struct ObfuscatedFunctionWithIR {
+    /// Original function RVA start.
+    pub original_rva: u32,
+    /// Original function size.
+    pub original_size: u32,
+    /// Obfuscated code bytes (encoded at initial target VA).
+    pub code: Vec<u8>,
+    /// Function name.
+    pub name: String,
+    /// Retained IR for re-encoding at a different VA.
+    pub ir: crate::ir::function::Function,
 }
 
 /// Minimum function size to obfuscate (need room for jmp rel32 trampoline).
@@ -330,6 +345,138 @@ pub fn run_pe_pipeline(
     }
 
     Ok(results)
+}
+
+/// Run the obfuscation pipeline on PE functions, returning IR for re-encoding.
+///
+/// Like `run_pe_pipeline`, but retains the IR so functions can be re-encoded
+/// at different VAs after cave allocation.
+pub fn run_pe_pipeline_with_ir(
+    functions: &[PeFunction],
+    image_base: u64,
+    config: &ObfuscatorConfig,
+) -> Result<Vec<ObfuscatedFunctionWithIR>> {
+    let seed = config.seed.unwrap_or_else(|| rand::random());
+    let rng = StdRng::seed_from_u64(seed);
+    log::info!("PE scatter pipeline using seed: {}", seed);
+
+    let all_passes = passes::default_pass_list();
+    let enabled_passes: Vec<Box<dyn ObfuscationPass>> = all_passes
+        .into_iter()
+        .filter(|p| !config.disabled_passes.contains(p.name()))
+        .collect();
+
+    let safe_passes: Vec<&dyn ObfuscationPass> = enabled_passes
+        .iter()
+        .filter(|p| !AGGRESSIVE_PASSES.contains(&p.name()))
+        .map(|p| p.as_ref())
+        .collect();
+    let aggressive_passes: Vec<&dyn ObfuscationPass> = enabled_passes
+        .iter()
+        .filter(|p| AGGRESSIVE_PASSES.contains(&p.name()))
+        .map(|p| p.as_ref())
+        .collect();
+
+    log::info!(
+        "Enabled passes: {:?}",
+        enabled_passes.iter().map(|p| p.name()).collect::<Vec<_>>()
+    );
+
+    let mut ctx = PassContext {
+        rng,
+        next_block_id: 10000,
+        next_insn_id: 100000,
+        junk_density: config.junk_density,
+    };
+
+    let mut results = Vec::new();
+
+    for func in functions {
+        if func.is_runtime {
+            continue;
+        }
+        if func.size() < MIN_FUNCTION_SIZE {
+            continue;
+        }
+        if pe_function_has_indirect_branches(func) {
+            log::info!("Skipping function {} — has indirect branches", func.name);
+            continue;
+        }
+
+        let passes: Vec<&dyn ObfuscationPass> = if func.is_main_reachable {
+            safe_passes.iter().chain(aggressive_passes.iter()).copied().collect()
+        } else {
+            safe_passes.clone()
+        };
+
+        match process_pe_function_to_ir(func, image_base, &passes, &mut ctx, config) {
+            Ok((code, ir)) => {
+                results.push(ObfuscatedFunctionWithIR {
+                    original_rva: func.start_rva,
+                    original_size: func.size(),
+                    code,
+                    name: func.name.clone(),
+                    ir,
+                });
+            }
+            Err(e) => {
+                log::warn!("Skipping function {} due to error: {}", func.name, e);
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Process a PE function through obfuscation passes, returning both code and IR.
+fn process_pe_function_to_ir(
+    func: &PeFunction,
+    image_base: u64,
+    passes: &[&dyn ObfuscationPass],
+    ctx: &mut PassContext,
+    config: &ObfuscatorConfig,
+) -> Result<(Vec<u8>, crate::ir::function::Function)> {
+    let source_va = image_base + func.start_rva as u64;
+    let insns = crate::ir::decode_raw(&func.code, source_va)
+        .context("Failed to decode PE function")?;
+
+    if insns.is_empty() {
+        anyhow::bail!("No instructions decoded");
+    }
+
+    let mut ir_func = crate::ir::cfg::build_cfg(insns, func.name.clone(), 0)
+        .context("Failed to build CFG")?;
+
+    if ir_func.next_block_id > ctx.next_block_id {
+        ctx.next_block_id = ir_func.next_block_id;
+    }
+    if ir_func.next_insn_id > ctx.next_insn_id {
+        ctx.next_insn_id = ir_func.next_insn_id;
+    }
+
+    for iteration in 0..config.iterations {
+        log::debug!("  {} iteration {}/{}", func.name, iteration + 1, config.iterations);
+        for pass in passes {
+            pass.run_on_function(&mut ir_func, ctx)
+                .with_context(|| format!("Pass '{}' failed on {}", pass.name(), func.name))?;
+        }
+    }
+
+    ir_func.next_block_id = ctx.next_block_id;
+    ir_func.next_insn_id = ctx.next_insn_id;
+
+    // Encode at dummy VA=0 to measure size
+    let encoded = crate::encode::assembler::encode_function(&ir_func, 0)
+        .context("Failed to encode PE function")?;
+
+    Ok((encoded.code, ir_func))
+}
+
+/// Re-encode an IR function at a specific target VA.
+pub fn reencode_at_va(ir: &crate::ir::function::Function, target_va: u64) -> Result<Vec<u8>> {
+    let encoded = crate::encode::assembler::encode_function(ir, target_va)
+        .context("Failed to re-encode function")?;
+    Ok(encoded.code)
 }
 
 /// Run the obfuscation pipeline on PE functions in-place (encode at original VA).

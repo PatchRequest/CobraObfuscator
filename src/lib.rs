@@ -38,6 +38,38 @@ pub fn obfuscate(input: &[u8], config: &ObfuscatorConfig) -> Result<Vec<u8>> {
 }
 
 /// Compute obfuscation statistics from PE file and obfuscation results.
+fn compute_stats_from_ir(
+    pe_file: &pe::types::PeFile,
+    obfuscated: &[pipeline::ObfuscatedFunctionWithIR],
+) -> ObfuscationStats {
+    let text_section_bytes: u64 = pe_file
+        .sections
+        .iter()
+        .filter(|s| s.is_code())
+        .map(|s| s.virtual_size as u64)
+        .sum();
+
+    let total_functions = pe_file.functions.len() as u32;
+    let runtime_functions = pe_file.functions.iter().filter(|f| f.is_runtime).count() as u32;
+    let obfuscated_functions = obfuscated.len() as u32;
+    let skipped_functions = total_functions - runtime_functions - obfuscated_functions;
+
+    let obfuscated_bytes: u64 = obfuscated.iter().map(|f| f.original_size as u64).sum();
+    let output_code_bytes: u64 = obfuscated.iter().map(|f| f.code.len() as u64).sum();
+
+    ObfuscationStats {
+        text_section_bytes,
+        total_functions,
+        runtime_functions,
+        obfuscated_functions,
+        skipped_functions,
+        obfuscated_bytes,
+        output_code_bytes,
+        inplace: false,
+    }
+}
+
+/// Compute obfuscation statistics from PE file and obfuscation results.
 fn compute_stats(
     pe_file: &pe::types::PeFile,
     obfuscated: &[pipeline::ObfuscatedFunction],
@@ -71,6 +103,10 @@ fn compute_stats(
 }
 
 /// Read a PE binary (.exe/.dll), obfuscate functions, and return the patched PE.
+///
+/// Uses scatter mode: obfuscated code is placed into caves within existing
+/// sections (original function bodies, inter-function padding) with overflow
+/// appended to the last section.
 pub fn obfuscate_pe(input: &[u8], config: &ObfuscatorConfig) -> Result<(Vec<u8>, ObfuscationStats)> {
     let pe_file = pe::reader::read_pe(input).context("Failed to read PE input")?;
 
@@ -84,31 +120,30 @@ pub fn obfuscate_pe(input: &[u8], config: &ObfuscatorConfig) -> Result<(Vec<u8>,
     // Validate reloc safety
     pe::reloc::validate_reloc_safety(&pe_file.sections)?;
 
-    // Calculate .text expansion layout
+    // Calculate extension layout (for overflow)
     let layout =
-        pe::writer::calculate_text_expansion(&pe_file).context("Failed to calculate .text expansion layout")?;
+        pe::writer::calculate_text_expansion(&pe_file).context("Failed to calculate text expansion layout")?;
 
     log::info!(
-        "Code section: VA=0x{:x}, raw_offset=0x{:x}",
+        "Extension area: VA=0x{:x}, raw_offset=0x{:x}",
         layout.virtual_address,
         layout.raw_offset,
     );
 
-    // Run the PE obfuscation pipeline
-    let obfuscated = pipeline::run_pe_pipeline(
+    // Run the PE obfuscation pipeline (returns IR for re-encoding)
+    let mut obfuscated = pipeline::run_pe_pipeline_with_ir(
         &pe_file.functions,
         pe_file.image_base,
-        layout.virtual_address,
         config,
     )
     .context("PE pipeline failed")?;
 
-    let stats = compute_stats(&pe_file, &obfuscated, false);
+    let stats = compute_stats_from_ir(&pe_file, &obfuscated);
     log::info!("Obfuscated {} functions", obfuscated.len());
 
-    // Write the patched PE
-    let output =
-        pe::writer::write_pe(&pe_file, &obfuscated, &layout).context("Failed to write PE output")?;
+    // Write the patched PE with scattered code
+    let output = pe::writer::write_pe_scattered(&pe_file, &mut obfuscated, &layout)
+        .context("Failed to write PE output")?;
 
     log::info!("Output PE: {} bytes", output.len());
     Ok((output, stats))
