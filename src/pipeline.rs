@@ -1,0 +1,512 @@
+use anyhow::{Context, Result};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
+
+use crate::coff::types::{CoffObject, CoffRelocation, CodeSection};
+use crate::config::ObfuscatorConfig;
+use crate::encode::assembler;
+use crate::encode::reloc_fixup;
+use crate::ir;
+use crate::ir::cfg;
+use crate::passes;
+use crate::passes::pass_trait::{ObfuscationPass, PassContext};
+use crate::pe::types::PeFunction;
+
+/// Run the full obfuscation pipeline on a COFF object.
+///
+/// Returns the transformed code for each code section as (bytes, relocations).
+pub fn run_pipeline(
+    coff: &CoffObject,
+    config: &ObfuscatorConfig,
+) -> Result<Vec<(Vec<u8>, Vec<CoffRelocation>)>> {
+    let seed = config.seed.unwrap_or_else(|| rand::random());
+    let rng = StdRng::seed_from_u64(seed);
+    log::info!("Using seed: {}", seed);
+
+    // Gather enabled passes
+    let all_passes = passes::default_pass_list();
+    let enabled_passes: Vec<Box<dyn ObfuscationPass>> = all_passes
+        .into_iter()
+        .filter(|p| !config.disabled_passes.contains(p.name()))
+        .collect();
+
+    log::info!(
+        "Enabled passes: {:?}",
+        enabled_passes.iter().map(|p| p.name()).collect::<Vec<_>>()
+    );
+
+    let mut ctx = PassContext {
+        rng,
+        next_block_id: 10000, // start high to avoid collisions
+        next_insn_id: 100000,
+        junk_density: config.junk_density,
+    };
+
+    let mut results = Vec::new();
+
+    for code_section in &coff.code_sections {
+        let (code, relocs) =
+            process_code_section(code_section, &enabled_passes, &mut ctx, config)?;
+        results.push((code, relocs));
+    }
+
+    Ok(results)
+}
+
+/// Process a single code section through the pipeline.
+fn process_code_section(
+    section: &CodeSection,
+    passes: &[Box<dyn ObfuscationPass>],
+    ctx: &mut PassContext,
+    config: &ObfuscatorConfig,
+) -> Result<(Vec<u8>, Vec<CoffRelocation>)> {
+    log::info!("Processing section: {}", section.name);
+
+    // Step 1: Decode section into IR instructions
+    let insns = ir::decode_section(section).context("Failed to decode section")?;
+    log::info!("  Decoded {} instructions", insns.len());
+
+    // Step 2: Build CFG
+    // For .obj files, we typically have one function per section, or we split by symbols.
+    // For now, treat the entire section as one function.
+    let mut func = cfg::build_cfg(
+        insns,
+        section.name.clone(),
+        0, // symbol index — we'll refine later
+    )
+    .context("Failed to build CFG")?;
+
+    log::info!(
+        "  Built CFG: {} blocks",
+        func.blocks.len()
+    );
+
+    // Sync IDs with context
+    if func.next_block_id > ctx.next_block_id {
+        ctx.next_block_id = func.next_block_id;
+    }
+    if func.next_insn_id > ctx.next_insn_id {
+        ctx.next_insn_id = func.next_insn_id;
+    }
+
+    // Step 3: Run passes for N iterations
+    for iteration in 0..config.iterations {
+        log::info!("  Iteration {}/{}", iteration + 1, config.iterations);
+
+        for pass in passes {
+            let changed = pass
+                .run_on_function(&mut func, ctx)
+                .with_context(|| format!("Pass '{}' failed", pass.name()))?;
+
+            if changed {
+                log::debug!("    Pass '{}' made changes", pass.name());
+            }
+        }
+    }
+
+    // Sync IDs back
+    func.next_block_id = ctx.next_block_id;
+    func.next_insn_id = ctx.next_insn_id;
+
+    // Step 4: Encode back to bytes
+    let encoded = assembler::encode_function(&func, section.virtual_address)
+        .context("Failed to encode function")?;
+
+    // Step 5: Validate relocations
+    reloc_fixup::validate_relocations(&encoded.relocations, encoded.code.len())
+        .context("Relocation validation failed")?;
+
+    let mut relocs = encoded.relocations;
+    reloc_fixup::sort_relocations(&mut relocs);
+
+    log::info!(
+        "  Encoded: {} bytes, {} relocations",
+        encoded.code.len(),
+        relocs.len()
+    );
+
+    Ok((encoded.code, relocs))
+}
+
+/// Statistics about the obfuscation run.
+#[derive(Debug, Clone)]
+pub struct ObfuscationStats {
+    /// Total size of executable sections (.text) in the binary.
+    pub text_section_bytes: u64,
+    /// Total number of functions discovered via .pdata.
+    pub total_functions: u32,
+    /// Number of functions classified as runtime/CRT (skipped).
+    pub runtime_functions: u32,
+    /// Number of functions successfully obfuscated.
+    pub obfuscated_functions: u32,
+    /// Number of functions skipped (too small, indirect branches, errors, grew too large).
+    pub skipped_functions: u32,
+    /// Sum of original sizes of obfuscated functions (bytes replaced).
+    pub obfuscated_bytes: u64,
+    /// Sum of obfuscated output code sizes.
+    pub output_code_bytes: u64,
+    /// Whether in-place mode was used.
+    pub inplace: bool,
+}
+
+impl ObfuscationStats {
+    /// Percentage of .text section bytes that were obfuscated.
+    pub fn text_coverage_pct(&self) -> f64 {
+        if self.text_section_bytes == 0 {
+            return 0.0;
+        }
+        self.obfuscated_bytes as f64 / self.text_section_bytes as f64 * 100.0
+    }
+
+    /// Average code expansion ratio.
+    pub fn expansion_ratio(&self) -> f64 {
+        if self.obfuscated_bytes == 0 {
+            return 1.0;
+        }
+        self.output_code_bytes as f64 / self.obfuscated_bytes as f64
+    }
+}
+
+impl std::fmt::Display for ObfuscationStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "--- Obfuscation Statistics ---")?;
+        writeln!(f, "  .text size:          {} bytes", self.text_section_bytes)?;
+        writeln!(f, "  Functions total:     {}", self.total_functions)?;
+        writeln!(f, "    Runtime (skipped): {}", self.runtime_functions)?;
+        writeln!(f, "    Obfuscated:        {}", self.obfuscated_functions)?;
+        writeln!(f, "    Skipped:           {}", self.skipped_functions)?;
+        writeln!(f, "  Original code:       {} bytes", self.obfuscated_bytes)?;
+        writeln!(f, "  Obfuscated code:     {} bytes ({:.2}x)", self.output_code_bytes, self.expansion_ratio())?;
+        writeln!(f, "  .text coverage:      {:.1}%", self.text_coverage_pct())?;
+        if self.inplace {
+            write!(f, "  Mode:                in-place")?;
+        } else {
+            write!(f, "  Mode:                trampoline (.cobra section)")?;
+        }
+        Ok(())
+    }
+}
+
+/// Result of obfuscating a single PE function.
+#[derive(Debug)]
+pub struct ObfuscatedFunction {
+    /// Original function RVA start.
+    pub original_rva: u32,
+    /// Original function size.
+    pub original_size: u32,
+    /// Obfuscated code bytes.
+    pub code: Vec<u8>,
+    /// Function name.
+    pub name: String,
+}
+
+/// Minimum function size to obfuscate (need room for jmp rel32 trampoline).
+const MIN_FUNCTION_SIZE: u32 = 5;
+
+/// Check if a PE function contains indirect branches (jump tables, computed gotos).
+/// Such functions cannot be safely trampolined because the jump table data in .rdata
+/// still points to the original .text addresses which get overwritten.
+fn pe_function_has_indirect_branches(func: &PeFunction) -> bool {
+    let mut decoder = iced_x86::Decoder::with_ip(
+        64,
+        &func.code,
+        func.start_rva as u64,
+        iced_x86::DecoderOptions::NONE,
+    );
+    while decoder.can_decode() {
+        let insn = decoder.decode();
+        if insn.flow_control() == iced_x86::FlowControl::IndirectBranch {
+            return true;
+        }
+    }
+    false
+}
+
+/// Passes that are only safe on confirmed user code (not library internals).
+/// CFF modifies stack frames which can break libc/runtime functions.
+const AGGRESSIVE_PASSES: &[&str] = &["control-flow-flatten", "dead-code"];
+
+/// Run the obfuscation pipeline on PE functions.
+pub fn run_pe_pipeline(
+    functions: &[PeFunction],
+    image_base: u64,
+    cobra_section_rva: u32,
+    config: &ObfuscatorConfig,
+) -> Result<Vec<ObfuscatedFunction>> {
+    let seed = config.seed.unwrap_or_else(|| rand::random());
+    let rng = StdRng::seed_from_u64(seed);
+    log::info!("PE pipeline using seed: {}", seed);
+
+    let all_passes = passes::default_pass_list();
+    let enabled_passes: Vec<Box<dyn ObfuscationPass>> = all_passes
+        .into_iter()
+        .filter(|p| !config.disabled_passes.contains(p.name()))
+        .collect();
+
+    // Split into safe passes (all functions) and aggressive passes (main-reachable only)
+    let safe_passes: Vec<&dyn ObfuscationPass> = enabled_passes
+        .iter()
+        .filter(|p| !AGGRESSIVE_PASSES.contains(&p.name()))
+        .map(|p| p.as_ref())
+        .collect();
+    let aggressive_passes: Vec<&dyn ObfuscationPass> = enabled_passes
+        .iter()
+        .filter(|p| AGGRESSIVE_PASSES.contains(&p.name()))
+        .map(|p| p.as_ref())
+        .collect();
+
+    log::info!(
+        "Enabled passes: {:?} (aggressive: {:?})",
+        enabled_passes.iter().map(|p| p.name()).collect::<Vec<_>>(),
+        aggressive_passes.iter().map(|p| p.name()).collect::<Vec<_>>()
+    );
+
+    let mut ctx = PassContext {
+        rng,
+        next_block_id: 10000,
+        next_insn_id: 100000,
+        junk_density: config.junk_density,
+    };
+
+    let mut results = Vec::new();
+    let mut current_offset: u32 = 0;
+
+    for func in functions {
+        if func.is_runtime {
+            log::info!("Skipping CRT/runtime function {}", func.name);
+            continue;
+        }
+
+        if func.size() < MIN_FUNCTION_SIZE {
+            log::warn!(
+                "Skipping function {} (size {} < {})",
+                func.name,
+                func.size(),
+                MIN_FUNCTION_SIZE
+            );
+            continue;
+        }
+
+        if pe_function_has_indirect_branches(func) {
+            log::info!(
+                "Skipping function {} — has indirect branches (jump table)",
+                func.name
+            );
+            continue;
+        }
+
+        let target_rva = cobra_section_rva + current_offset;
+        let target_va = image_base + target_rva as u64;
+
+        // Use all passes for main-reachable functions, safe-only for library code
+        let passes: Vec<&dyn ObfuscationPass> = if func.is_main_reachable {
+            safe_passes.iter().chain(aggressive_passes.iter()).copied().collect()
+        } else {
+            log::debug!("  {} — not main-reachable, skipping CFF", func.name);
+            safe_passes.clone()
+        };
+
+        match process_pe_function_dyn(func, image_base, target_va, &passes, &mut ctx, config) {
+            Ok(code) => {
+                log::info!(
+                    "  {} -> {} bytes (was {})",
+                    func.name,
+                    code.len(),
+                    func.size()
+                );
+                let obf = ObfuscatedFunction {
+                    original_rva: func.start_rva,
+                    original_size: func.size(),
+                    code,
+                    name: func.name.clone(),
+                };
+                current_offset += obf.code.len() as u32;
+                results.push(obf);
+            }
+            Err(e) => {
+                log::warn!("Skipping function {} due to error: {}", func.name, e);
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Run the obfuscation pipeline on PE functions in-place (encode at original VA).
+///
+/// Unlike `run_pe_pipeline`, this encodes each function at its original virtual address
+/// so that PC-to-metadata mappings (e.g. Go's .gopclntab) remain valid.
+pub fn run_pe_pipeline_inplace(
+    functions: &[PeFunction],
+    image_base: u64,
+    config: &ObfuscatorConfig,
+) -> Result<Vec<ObfuscatedFunction>> {
+    let seed = config.seed.unwrap_or_else(|| rand::random());
+    let rng = StdRng::seed_from_u64(seed);
+    log::info!("PE in-place pipeline using seed: {}", seed);
+
+    // In-place mode: exclude size-increasing passes (CFF, junk-insertion)
+    // since the obfuscated code must fit in the original function's space.
+    const SIZE_INCREASING_PASSES: &[&str] = &["control-flow-flatten", "junk-insertion"];
+
+    let all_passes = passes::default_pass_list();
+    let enabled_passes: Vec<Box<dyn ObfuscationPass>> = all_passes
+        .into_iter()
+        .filter(|p| !config.disabled_passes.contains(p.name()))
+        .filter(|p| !SIZE_INCREASING_PASSES.contains(&p.name()))
+        .collect();
+
+    log::info!(
+        "In-place enabled passes: {:?}",
+        enabled_passes.iter().map(|p| p.name()).collect::<Vec<_>>()
+    );
+
+    let mut ctx = PassContext {
+        rng,
+        next_block_id: 10000,
+        next_insn_id: 100000,
+        junk_density: config.junk_density,
+    };
+
+    let mut results = Vec::new();
+    let mut patched = 0u32;
+    let mut skipped_size = 0u32;
+
+    for func in functions {
+        if func.is_runtime {
+            log::info!("Skipping CRT/runtime function {}", func.name);
+            continue;
+        }
+
+        if func.size() < MIN_FUNCTION_SIZE {
+            log::warn!(
+                "Skipping function {} (size {} < {})",
+                func.name,
+                func.size(),
+                MIN_FUNCTION_SIZE
+            );
+            continue;
+        }
+
+        if pe_function_has_indirect_branches(func) {
+            log::info!(
+                "Skipping function {} — has indirect branches",
+                func.name
+            );
+            continue;
+        }
+
+        // Encode at the ORIGINAL VA so PCs stay in the original range
+        let source_va = image_base + func.start_rva as u64;
+
+        match process_pe_function(func, image_base, source_va, &enabled_passes, &mut ctx, config) {
+            Ok(code) => {
+                if code.len() > func.size() as usize {
+                    log::debug!(
+                        "  {} grew ({} > {}), skipping in-place",
+                        func.name, code.len(), func.size()
+                    );
+                    skipped_size += 1;
+                    continue;
+                }
+                log::info!(
+                    "  {} -> {} bytes (was {})",
+                    func.name,
+                    code.len(),
+                    func.size()
+                );
+                patched += 1;
+                results.push(ObfuscatedFunction {
+                    original_rva: func.start_rva,
+                    original_size: func.size(),
+                    code,
+                    name: func.name.clone(),
+                });
+            }
+            Err(e) => {
+                log::warn!("Skipping function {} due to error: {}", func.name, e);
+            }
+        }
+    }
+
+    log::info!(
+        "In-place summary: {} patched, {} skipped (grew too large)",
+        patched, skipped_size
+    );
+
+    Ok(results)
+}
+
+/// Process a single PE function through decode → passes → encode (dynamic dispatch).
+fn process_pe_function_dyn(
+    func: &PeFunction,
+    image_base: u64,
+    target_va: u64,
+    passes: &[&dyn ObfuscationPass],
+    ctx: &mut PassContext,
+    config: &ObfuscatorConfig,
+) -> Result<Vec<u8>> {
+    process_pe_function_impl(func, image_base, target_va, passes, ctx, config)
+}
+
+/// Process a single PE function through decode → passes → encode.
+fn process_pe_function(
+    func: &PeFunction,
+    image_base: u64,
+    target_va: u64,
+    passes: &[Box<dyn ObfuscationPass>],
+    ctx: &mut PassContext,
+    config: &ObfuscatorConfig,
+) -> Result<Vec<u8>> {
+    let pass_refs: Vec<&dyn ObfuscationPass> = passes.iter().map(|p| p.as_ref()).collect();
+    process_pe_function_impl(func, image_base, target_va, &pass_refs, ctx, config)
+}
+
+fn process_pe_function_impl(
+    func: &PeFunction,
+    image_base: u64,
+    target_va: u64,
+    passes: &[&dyn ObfuscationPass],
+    ctx: &mut PassContext,
+    config: &ObfuscatorConfig,
+) -> Result<Vec<u8>> {
+    // Decode at the function's original VA so branch targets resolve correctly in the CFG.
+    // BlockEncoder will re-encode at target_va.
+    let source_va = image_base + func.start_rva as u64;
+    let insns = ir::decode_raw(&func.code, source_va)
+        .context("Failed to decode PE function")?;
+
+    if insns.is_empty() {
+        anyhow::bail!("No instructions decoded");
+    }
+
+    // Build CFG
+    let mut ir_func = cfg::build_cfg(insns, func.name.clone(), 0)
+        .context("Failed to build CFG")?;
+
+    // Sync IDs
+    if ir_func.next_block_id > ctx.next_block_id {
+        ctx.next_block_id = ir_func.next_block_id;
+    }
+    if ir_func.next_insn_id > ctx.next_insn_id {
+        ctx.next_insn_id = ir_func.next_insn_id;
+    }
+
+    // Run passes
+    for iteration in 0..config.iterations {
+        log::debug!("  {} iteration {}/{}", func.name, iteration + 1, config.iterations);
+        for pass in passes {
+            pass.run_on_function(&mut ir_func, ctx)
+                .with_context(|| format!("Pass '{}' failed on {}", pass.name(), func.name))?;
+        }
+    }
+
+    ir_func.next_block_id = ctx.next_block_id;
+    ir_func.next_insn_id = ctx.next_insn_id;
+
+    // Encode at target VA
+    let encoded = assembler::encode_function(&ir_func, target_va)
+        .context("Failed to encode PE function")?;
+
+    Ok(encoded.code)
+}

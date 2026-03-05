@@ -1,0 +1,28 @@
+# Build artifacts
+/target/
+tests/rust_crypto/target/
+tests/rust_structs/target/
+
+# Compiled binaries
+*.exe
+*.obj
+*.o
+*.a
+*.lib
+*.dll
+*.pdb
+*.exp
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Misc
+nul
