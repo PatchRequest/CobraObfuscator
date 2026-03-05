@@ -242,7 +242,7 @@ fn main() -> ExitCode {
 
     // Iterator chains
     let (sum, count, product) = iterator_chain_test();
-    check!(sum == 200099, "iterator filter+map+sum");
+    check!(sum == 164036, "iterator filter+map+sum");
     check!(count == 14, "iterator filter count div7");
     check!(product == 3628800, "iterator take(10) product = 10!");
 

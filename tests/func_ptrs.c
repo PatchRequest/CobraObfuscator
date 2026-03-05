@@ -107,7 +107,7 @@ int main(void) {
 
     // Array of function pointers
     BinOp ops[] = { add, sub, mul, my_div, my_mod };
-    int results[] = { 30, -10, 200, 2, 0 };
+    int results[] = { 30, -10, 200, 0, 10 };
     int all_ok = 1;
     for (int i = 0; i < 5; i++) {
         if (ops[i](10, 20) != results[i]) all_ok = 0;
