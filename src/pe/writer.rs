@@ -153,14 +153,30 @@ fn allocate_scattered(
     // The first 5 bytes are reserved for the trampoline JMP, so cave = body[5..].
     let mut caves: Vec<Cave> = Vec::new();
 
-    // Add original function bodies as caves (minus 5 bytes for trampoline)
-    for func in funcs {
-        if func.original_size > 5 {
-            caves.push(Cave {
-                rva: func.original_rva + 5, // after the trampoline
-                size: func.original_size - 5,
-            });
+    // Add original function bodies as caves (minus 5 bytes for trampoline).
+    // Only safe when no RIP-relative references from outside point into bodies.
+    // MSVC binaries embed security cookies and other data referenced by
+    // RIP-relative addressing near function bodies, so we check for this.
+    let has_security_cookie = pe.sections.iter().any(|s| {
+        s.name == "_RDATA" || s.name == ".gfids" || s.name == ".fptable"
+    });
+
+    if !has_security_cookie {
+        // Safe to use function bodies as caves (GCC, Clang, Rust binaries)
+        let mut seen_rvas = std::collections::HashSet::new();
+        for func in funcs {
+            if func.original_size > 5 {
+                let cave_rva = func.original_rva + 5;
+                if seen_rvas.insert(cave_rva) {
+                    caves.push(Cave {
+                        rva: cave_rva,
+                        size: func.original_size - 5,
+                    });
+                }
+            }
         }
+    } else {
+        log::info!("MSVC binary detected — skipping function body caves for safety");
     }
 
     // Add inter-function padding caves
@@ -181,7 +197,8 @@ fn allocate_scattered(
         let need = funcs[fi].code.len() as u32;
 
         // A function cannot be placed in its OWN original body cave
-        // (that's where the trampoline goes). Find best-fit cave.
+        // (that's where the trampoline goes). Also prevent placement in
+        // caves of functions that share the same original_rva (ICF).
         let own_cave_rva = funcs[fi].original_rva + 5;
 
         let mut best_cave: Option<usize> = None;
@@ -342,9 +359,9 @@ pub fn write_pe_scattered(
         }
     }
 
-    // Phase 3: Re-assign extension placements sequentially with actual re-encoded sizes
-    let mut ext_offset: u32 = 0;
-    // Collect extension indices in their current target_rva order
+    // Phase 3: Lay out extension functions and iterate until sizes converge.
+    // Encoding at a specific VA can change code size (branch encoding differs),
+    // so we iterate: assign offsets → encode → check sizes → repeat.
     let mut ext_indices: Vec<usize> = placements
         .iter()
         .enumerate()
@@ -353,22 +370,34 @@ pub fn write_pe_scattered(
         .collect();
     ext_indices.sort_by_key(|&i| placements[i].target_rva);
 
-    for &pi in &ext_indices {
-        let fi = placements[pi].func_index;
-        placements[pi].target_rva = layout.virtual_address + ext_offset;
-        ext_offset += funcs[fi].code.len() as u32;
+    for _round in 0..3 {
+        // Assign sequential offsets based on current sizes
+        let mut ext_offset: u32 = 0;
+        for &pi in &ext_indices {
+            let fi = placements[pi].func_index;
+            placements[pi].target_rva = layout.virtual_address + ext_offset;
+            ext_offset += funcs[fi].code.len() as u32;
+        }
+
+        // Re-encode at assigned VAs
+        let mut changed = false;
+        for &pi in &ext_indices {
+            let fi = placements[pi].func_index;
+            let target_va = image_base + placements[pi].target_rva as u64;
+            let new_code = crate::pipeline::reencode_at_va(&funcs[fi].ir, target_va)
+                .with_context(|| format!("Re-encode failed for {}", funcs[fi].name))?;
+            if new_code.len() != funcs[fi].code.len() {
+                changed = true;
+            }
+            funcs[fi].code = new_code;
+        }
+
+        if !changed {
+            break;
+        }
     }
 
-    // Re-encode extension functions at their corrected VAs
-    for &pi in &ext_indices {
-        let fi = placements[pi].func_index;
-        let target_va = image_base + placements[pi].target_rva as u64;
-        let new_code = crate::pipeline::reencode_at_va(&funcs[fi].ir, target_va)
-            .with_context(|| format!("Re-encode failed for {}", funcs[fi].name))?;
-        funcs[fi].code = new_code;
-    }
-
-    // Recalculate extension size with final code sizes
+    // Final extension size from converged sizes
     let mut extension_size: u32 = 0;
     for &pi in &ext_indices {
         extension_size += funcs[placements[pi].func_index].code.len() as u32;

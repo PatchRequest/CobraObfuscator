@@ -130,23 +130,49 @@ pub fn obfuscate_pe(input: &[u8], config: &ObfuscatorConfig) -> Result<(Vec<u8>,
         layout.raw_offset,
     );
 
-    // Run the PE obfuscation pipeline (returns IR for re-encoding)
-    let mut obfuscated = pipeline::run_pe_pipeline_with_ir(
-        &pe_file.functions,
-        pe_file.image_base,
-        config,
-    )
-    .context("PE pipeline failed")?;
+    // Check if scatter is safe (MSVC binaries have data embedded in function
+    // bodies that can be corrupted by cave placement)
+    let is_msvc = pe_file.sections.iter().any(|s| {
+        s.name == "_RDATA" || s.name == ".gfids" || s.name == ".fptable"
+    });
 
-    let stats = compute_stats_from_ir(&pe_file, &obfuscated);
-    log::info!("Obfuscated {} functions", obfuscated.len());
+    if is_msvc {
+        // MSVC: use direct pipeline (encode at correct VA from start)
+        log::info!("MSVC binary detected — using direct extension mode");
+        let obfuscated = pipeline::run_pe_pipeline(
+            &pe_file.functions,
+            pe_file.image_base,
+            layout.virtual_address,
+            config,
+        )
+        .context("PE pipeline failed")?;
 
-    // Write the patched PE with scattered code
-    let output = pe::writer::write_pe_scattered(&pe_file, &mut obfuscated, &layout)
-        .context("Failed to write PE output")?;
+        let stats = compute_stats(&pe_file, &obfuscated, false);
+        log::info!("Obfuscated {} functions", obfuscated.len());
 
-    log::info!("Output PE: {} bytes", output.len());
-    Ok((output, stats))
+        let output = pe::writer::write_pe(&pe_file, &obfuscated, &layout)
+            .context("Failed to write PE output")?;
+
+        log::info!("Output PE: {} bytes", output.len());
+        Ok((output, stats))
+    } else {
+        // GCC/Clang/Rust: use scatter pipeline (cave placement + re-encoding)
+        let mut obfuscated = pipeline::run_pe_pipeline_with_ir(
+            &pe_file.functions,
+            pe_file.image_base,
+            config,
+        )
+        .context("PE pipeline failed")?;
+
+        let stats = compute_stats_from_ir(&pe_file, &obfuscated);
+        log::info!("Obfuscated {} functions", obfuscated.len());
+
+        let output = pe::writer::write_pe_scattered(&pe_file, &mut obfuscated, &layout)
+            .context("Failed to write PE output")?;
+
+        log::info!("Output PE: {} bytes", output.len());
+        Ok((output, stats))
+    }
 }
 
 /// Read a PE binary, obfuscate functions in-place (no new section), and return the patched PE.
