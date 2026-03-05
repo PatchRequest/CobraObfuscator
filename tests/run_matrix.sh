@@ -313,14 +313,11 @@ fi
 # ============================================================================
 # Part 3: Go test programs
 # ============================================================================
-# NOTE: Go binaries use a custom runtime with its own PC-to-function metadata
-# (.gopclntab). Trampolining functions to .cobra breaks Go's unwinder, GC, and
-# goroutine scheduler. Go support requires patching .gopclntab which is not yet
-# implemented. Go tests are compiled and run (to verify they build), but
-# obfuscation is expected to fail at runtime.
+# Go binaries are auto-detected and obfuscated in-place (preserving .gopclntab).
+# Only the "all" pass combo is tested since in-place mode has size constraints.
 if [ -n "$GO" ]; then
     echo ""
-    echo -e "${CYAN}===== Compiler: go (compile-only — obfuscation not yet supported) =====${NC}"
+    echo -e "${CYAN}===== Compiler: go (in-place mode) =====${NC}"
 
     for test_name in $ALL_GO_TESTS; do
         test_dir="$SCRIPT_DIR/$test_name"
@@ -347,8 +344,7 @@ if [ -n "$GO" ]; then
             continue
         fi
 
-        echo -e "    ${GREEN}OK${NC} $test_name builds and runs (obfuscation skipped — Go not supported)"
-        skip_all_combos "go" "default" "$test_name" "GO_UNSUPPORTED" "0"
+        run_all_combos "go" "default" "$test_name" "$bin"
     done
 else
     echo ""
