@@ -11,7 +11,7 @@
 
 **Post-compilation x86-64 binary obfuscator for Windows PE executables and DLLs.**
 
-Cobra operates directly on compiled `.exe` and `.dll` binaries — no source code, no recompilation, no compiler plugins. Hand it a PE binary and it produces an obfuscated copy with a new `.cobra` code section containing transformed function bodies.
+Cobra operates directly on compiled `.exe` and `.dll` binaries — no source code, no recompilation, no compiler plugins. Hand it a PE binary and it produces an obfuscated copy with transformed function bodies scattered throughout the existing `.text` section.
 
 Supports binaries compiled with **GCC (MinGW)**, **Clang**, **MSVC**, **Rust**, and **Go**.
 
@@ -35,6 +35,15 @@ Automatically identifies CRT/runtime functions via inverted call graph analysis 
 ### Obfuscation Statistics
 Reports detailed metrics after each run: .text coverage, function counts, expansion ratio, and pass breakdown.
 
+### Stealth Code Placement
+Three placement modes keep obfuscated code hidden within existing PE structure:
+
+- **Scatter** (GCC/Clang/Rust) — obfuscated functions are placed into code caves within `.text`: original function bodies (after trampolining) and inter-function alignment padding. ~84% of functions fit inside `.text` caves; overflow extends the last section.
+- **Extension** (MSVC) — obfuscated code appended to the last section. Avoids disturbing MSVC-specific structures (ICF, security cookies).
+- **In-place** (Go) — obfuscated code written back at the original function address, preserving PC-to-metadata mappings (`.gopclntab`). Functions that grow too large are skipped.
+
+No new sections are added. No suspicious section names.
+
 ### Seed-Based Reproducibility
 All transforms use a seeded PRNG. Same seed, same output — useful for debugging, CI, and deterministic builds.
 
@@ -48,8 +57,8 @@ All transforms use a seeded PRNG. Same seed, same output — useful for debuggin
    - All user functions: `insn_substitution → junk_insertion`
    - Main-reachable functions: additionally `dead_code → control_flow_flatten`
 6. **Encode** transformed functions into machine code
-7. **Emit** a new `.cobra` section containing all obfuscated function bodies
-8. **Patch** original functions with `jmp` trampolines redirecting into `.cobra`
+7. **Scatter** obfuscated code into caves within `.text` — original function bodies, inter-function padding, and overflow appended to the last section
+8. **Patch** original functions with `jmp` trampolines redirecting to their new locations
 
 ## Usage
 
@@ -122,13 +131,17 @@ cd tests && bash run_matrix.sh
 
 ### Coverage
 
-| Target | .text Coverage | Status |
-|--------|---------------|--------|
-| C (GCC, 9 programs) | 58–63% | All pass |
-| Rust (debug + release) | 76–84% | All pass |
-| C DLL (GCC) | ~68% | All pass |
-| Rust DLL (cdylib) | ~80% | All pass |
-| Large binaries (8MB+) | ~74% | Tested |
+| Target | .text Coverage | Mode | Status |
+|--------|---------------|------|--------|
+| C (GCC, 9 programs) | 58–63% | Scatter | All pass |
+| C (Clang, 9 programs) | 58–63% | Scatter | All pass |
+| C (MSVC, 9 programs) | 55–60% | Extension | All pass |
+| Rust (debug + release) | 76–84% | Scatter | All pass |
+| Go (2 programs) | 40–50% | In-place | All pass |
+| C DLL (GCC) | ~68% | Scatter | All pass |
+| Rust DLL (cdylib) | ~80% | Scatter | All pass |
+
+**13,530 tests** across all compilers, optimization levels, pass combinations, and seeds — all passing.
 
 ## Architecture
 
@@ -152,9 +165,10 @@ src/
 │   └── relocation.rs    Relocation tracking
 ├── pe/
 │   ├── reader.rs        PE parsing, function discovery, CRT detection
-│   ├── writer.rs        .cobra section creation + trampolines
+│   ├── writer.rs        Scatter/extension/in-place writers + trampolines
 │   ├── pdata.rs         Exception table parsing
-│   └── reloc.rs         PE relocation handling
+│   ├── reloc.rs         PE relocation handling
+│   └── types.rs         PE data structures
 ├── coff/
 │   ├── reader.rs        COFF object file parsing
 │   ├── writer.rs        COFF output
@@ -170,7 +184,7 @@ src/
 - **Windows PE only** — no ELF/Mach-O (yet)
 - Functions with jump tables (indirect branches) are skipped to preserve correctness
 - CRT/runtime functions are intentionally excluded from transformation
-- Go binaries: obfuscation runs but runtime metadata (.gopclntab) is not patched, so obfuscated Go binaries may crash
+- Go binaries use in-place mode (code stays at original addresses) to preserve `.gopclntab` metadata
 
 ## License
 
