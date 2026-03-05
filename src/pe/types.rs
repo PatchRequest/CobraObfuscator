@@ -27,6 +27,10 @@ pub struct PeFile {
     pub size_of_headers: u32,
     /// Entry point RVA.
     pub entry_point_rva: u32,
+    /// Offset of the data directory array in the optional header.
+    pub data_directory_offset: usize,
+    /// Number of data directory entries.
+    pub number_of_rva_and_sizes: u32,
 }
 
 /// A function discovered from .pdata RUNTIME_FUNCTION entries.

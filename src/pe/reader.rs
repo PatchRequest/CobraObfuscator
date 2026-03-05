@@ -62,6 +62,14 @@ pub fn read_pe(data: &[u8]) -> Result<PeFile> {
             .unwrap(),
     );
 
+    // NumberOfRvaAndSizes and data directory offset (PE32+: offset 108 from optional header)
+    let number_of_rva_and_sizes = u32::from_le_bytes(
+        data[optional_header_offset + 108..optional_header_offset + 112]
+            .try_into()
+            .unwrap(),
+    );
+    let data_directory_offset = optional_header_offset + 112;
+
     // Parse section headers
     let section_table_offset = optional_header_offset + size_of_optional_header as usize;
     let mut sections = Vec::new();
@@ -226,6 +234,8 @@ pub fn read_pe(data: &[u8]) -> Result<PeFile> {
         number_of_sections,
         size_of_headers,
         entry_point_rva,
+        data_directory_offset,
+        number_of_rva_and_sizes,
     })
 }
 

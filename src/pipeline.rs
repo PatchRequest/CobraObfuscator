@@ -181,7 +181,7 @@ impl std::fmt::Display for ObfuscationStats {
         if self.inplace {
             write!(f, "  Mode:                in-place")?;
         } else {
-            write!(f, "  Mode:                trampoline (.cobra section)")?;
+            write!(f, "  Mode:                trampoline")?;
         }
         Ok(())
     }

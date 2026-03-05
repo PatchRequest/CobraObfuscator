@@ -84,12 +84,12 @@ pub fn obfuscate_pe(input: &[u8], config: &ObfuscatorConfig) -> Result<(Vec<u8>,
     // Validate reloc safety
     pe::reloc::validate_reloc_safety(&pe_file.sections)?;
 
-    // Calculate .cobra section layout
+    // Calculate .text expansion layout
     let layout =
-        pe::writer::calculate_cobra_section(&pe_file).context("Failed to calculate .cobra layout")?;
+        pe::writer::calculate_text_expansion(&pe_file).context("Failed to calculate .text expansion layout")?;
 
     log::info!(
-        ".cobra section: VA=0x{:x}, raw_offset=0x{:x}",
+        "Code section: VA=0x{:x}, raw_offset=0x{:x}",
         layout.virtual_address,
         layout.raw_offset,
     );
