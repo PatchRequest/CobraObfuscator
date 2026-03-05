@@ -5,6 +5,12 @@ use object::Object;
 use super::pdata;
 use super::types::{PeFile, PeFunction, PeSectionInfo};
 
+/// Detect if a PE file is a Go binary (has Go build ID or go.buildid marker).
+pub fn is_go_binary(data: &[u8]) -> bool {
+    // Go embeds "Go build ID:" or "go.buildid" in every binary
+    data.windows(12).any(|w| w == b"Go build ID:" || w == b"go.buildid\x00\x00")
+}
+
 /// Parse a PE file from raw bytes.
 pub fn read_pe(data: &[u8]) -> Result<PeFile> {
     // Validate MZ header
@@ -180,15 +186,20 @@ pub fn read_pe(data: &[u8]) -> Result<PeFile> {
             code,
             pdata_index: i,
             is_runtime: false, // will be set below
+            is_main_reachable: false, // will be set below
         });
     }
 
-    // Identify user functions by tracing the call graph from main().
-    // Everything NOT reachable from main is marked as runtime/CRT.
-    let user_rvas = identify_user_functions(entry_point_rva, &functions);
+    // Identify CRT/runtime functions by tracing the call graph from the entry point.
+    // Everything reachable from the entry point (up to and excluding main) is CRT.
+    // Everything else is treated as user code.
+    let (crt_rvas, main_reachable_rvas) = identify_crt_functions(entry_point_rva, &functions);
     for func in &mut functions {
-        if !user_rvas.contains(&func.start_rva) {
+        if crt_rvas.contains(&func.start_rva) {
             func.is_runtime = true;
+        }
+        if main_reachable_rvas.contains(&func.start_rva) {
+            func.is_main_reachable = true;
         }
     }
 
@@ -218,78 +229,71 @@ pub fn read_pe(data: &[u8]) -> Result<PeFile> {
     })
 }
 
-/// Identify user functions by tracing the call graph from main().
+/// Identify CRT/runtime functions by tracing the call graph from the entry point.
 ///
 /// Strategy:
 /// 1. Find entry point → __tmainCRTStartup → main (first E8 call chain)
-/// 2. From main, recursively follow all E8 (call rel32) targets
-/// 3. Only functions reachable from main are "user" functions
-/// 4. Everything else is CRT/runtime
-fn identify_user_functions(
+/// 2. Mark entry point and CRT startup (and its direct call targets, excluding main) as CRT
+/// 3. BFS from CRT startup targets to find all CRT-reachable functions
+/// 4. Everything NOT in the CRT set is user code
+///
+/// This inverted approach works better for large binaries where main() uses indirect
+/// calls (vtables, function pointers) that BFS can't follow.
+fn identify_crt_functions(
     entry_rva: u32,
     functions: &[PeFunction],
-) -> std::collections::HashSet<u32> {
-    let mut user_rvas = std::collections::HashSet::new();
+) -> (std::collections::HashSet<u32>, std::collections::HashSet<u32>) {
+    use std::collections::{HashMap, HashSet, VecDeque};
 
-    // Build a map from RVA to function for quick lookup
-    let func_by_rva: std::collections::HashMap<u32, &PeFunction> =
+    let mut crt_rvas = HashSet::new();
+    let mut main_reachable = HashSet::new();
+
+    let func_by_rva: HashMap<u32, &PeFunction> =
         functions.iter().map(|f| (f.start_rva, f)).collect();
-    let func_rvas: std::collections::HashSet<u32> = functions.iter().map(|f| f.start_rva).collect();
+    let func_rvas: HashSet<u32> = functions.iter().map(|f| f.start_rva).collect();
 
-    // Find entry point
+    // Always mark entry point as CRT
+    crt_rvas.insert(entry_rva);
+
+    // Try MSVC/MinGW heuristic: entry → CRT startup → main
     let entry_func = match func_by_rva.get(&entry_rva) {
         Some(f) => f,
         None => {
-            log::warn!("Entry point 0x{:x} not in .pdata function list", entry_rva);
-            return user_rvas;
+            // Entry not in .pdata (Go, etc.) — can't identify CRT, return empty
+            log::info!("Entry point 0x{:x} not in .pdata — no CRT detection", entry_rva);
+            return (crt_rvas, main_reachable);
         }
     };
 
     log::info!("CRT: entry point {} at RVA 0x{:x}", entry_func.name, entry_rva);
 
-    // Find __tmainCRTStartup (first E8 call from entry point)
-    let crt_startup_rva = match find_first_e8_target(&entry_func.code, entry_rva) {
+    // Find CRT startup (first E8 call from entry point)
+    let startup_rva = match find_first_e8_target(&entry_func.code, entry_rva) {
         Some(rva) if func_rvas.contains(&rva) => rva,
         _ => {
-            log::warn!("Could not identify CRT startup function from entry point");
-            return user_rvas;
+            log::info!("Could not find CRT startup from entry point");
+            return (crt_rvas, main_reachable);
         }
     };
 
-    let crt_startup = match func_by_rva.get(&crt_startup_rva) {
-        Some(f) => f,
-        None => return user_rvas,
-    };
+    crt_rvas.insert(startup_rva);
+    let crt_startup = func_by_rva[&startup_rva];
+    log::info!("CRT: startup {} at RVA 0x{:x}", crt_startup.name, startup_rva);
 
-    log::info!("CRT: startup {} at RVA 0x{:x}", crt_startup.name, crt_startup_rva);
-
-    // Find main: among all E8 call targets from CRT startup, main is the one
-    // that reaches the most local functions via BFS. CRT init functions mostly
-    // call imports (indirect), while main calls user functions (direct E8).
-    //
-    // MSVC note: __scrt_common_main_seh is split across multiple .pdata entries
-    // (SEH chaining), so the function's code bytes may be truncated. If we find
-    // no E8 targets, extend the scan to include consecutive .pdata entries that
-    // immediately follow the startup function.
-    let mut call_targets = find_all_e8_targets(&crt_startup.code, crt_startup_rva);
+    // Get all call targets from CRT startup (including extended SEH chain for MSVC)
+    let mut call_targets = find_all_e8_targets(&crt_startup.code, startup_rva);
 
     if call_targets.is_empty() {
-        // MSVC fallback: __scrt_common_main_seh is split across multiple .pdata
-        // entries (SEH chaining). Extend the scan to include a few nearby entries
-        // (invoke_main is typically right after the startup function).
-        // Limit to ~1KB total to avoid absorbing unrelated CRT functions.
-        let startup_end = crt_startup_rva + crt_startup.code.len() as u32;
+        // MSVC fallback: __scrt_common_main_seh spans multiple .pdata entries
+        let startup_end = startup_rva + crt_startup.code.len() as u32;
         let mut extended_code = crt_startup.code.clone();
         let mut current_end = startup_end;
-        const MAX_EXTENSION: usize = 1024;
 
         let mut sorted_funcs: Vec<&PeFunction> = functions.iter().collect();
         sorted_funcs.sort_by_key(|f| f.start_rva);
 
         for func in &sorted_funcs {
-            if extended_code.len() >= MAX_EXTENSION {
-                break;
-            }
+            if extended_code.len() >= 1024 { break; }
             if func.start_rva >= current_end && func.start_rva <= current_end + 64 {
                 let gap = (func.start_rva - current_end) as usize;
                 extended_code.extend(std::iter::repeat(0xCC).take(gap));
@@ -301,91 +305,95 @@ fn identify_user_functions(
         }
 
         if extended_code.len() > crt_startup.code.len() {
-            log::info!(
-                "Extended CRT startup scan: {} -> {} bytes (MSVC SEH chain)",
-                crt_startup.code.len(),
-                extended_code.len()
-            );
-            call_targets = find_all_e8_targets(&extended_code, crt_startup_rva);
+            call_targets = find_all_e8_targets(&extended_code, startup_rva);
         }
     }
 
-    let candidates: Vec<u32> = call_targets
+    // Find main: the CRT startup target with the highest reachability
+    let candidates: HashSet<u32> = call_targets
         .iter()
-        .filter(|t| func_rvas.contains(t) && **t != entry_rva && **t != crt_startup_rva)
+        .filter(|t| func_rvas.contains(t) && **t != entry_rva && **t != startup_rva)
         .copied()
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
         .collect();
 
-    let mut main_rva = None;
+    let mut main_rva: Option<u32> = None;
     let mut best_reach = 0;
-    for candidate in &candidates {
-        let reach = bfs_reachable_count(*candidate, &func_by_rva, &func_rvas);
-        log::debug!("  candidate 0x{:x}: reaches {} local functions", candidate, reach);
+    for &candidate in &candidates {
+        let reach = bfs_reachable_count(candidate, &func_by_rva, &func_rvas);
         if reach > best_reach {
             best_reach = reach;
-            main_rva = Some(*candidate);
+            main_rva = Some(candidate);
         }
     }
 
-    let main_rva = match main_rva {
-        Some(rva) => {
-            log::info!("Detected main at RVA 0x{:x} (reaches {} functions)", rva, best_reach);
-            rva
+    if let Some(rva) = main_rva {
+        log::info!("Detected main at RVA 0x{:x} (reaches {} functions)", rva, best_reach);
+    } else {
+        // Fallback: scan all functions for highest reachability
+        for func in functions {
+            if func.start_rva == entry_rva || func.start_rva == startup_rva { continue; }
+            let reach = bfs_reachable_count(func.start_rva, &func_by_rva, &func_rvas);
+            if reach > best_reach {
+                best_reach = reach;
+                main_rva = Some(func.start_rva);
+            }
         }
-        None => {
-            log::warn!("Could not identify main() — marking all as runtime");
-            return user_rvas;
+        if let Some(rva) = main_rva {
+            log::info!("Fallback: detected main at RVA 0x{:x} (reaches {} functions)", rva, best_reach);
         }
-    };
+    }
 
-    // Build the set of CRT startup's direct call targets (excluding main).
-    // In MinGW, main() calls __main() which is a CRT function that initializes
-    // global constructors. We must NOT follow calls into CRT startup targets
-    // during BFS from main, otherwise we'd trampoline CRT functions and break them.
-    let crt_targets: std::collections::HashSet<u32> = call_targets
+    // All CRT startup call targets EXCEPT main are CRT functions.
+    // BFS from those to find the full CRT set.
+    let crt_seeds: Vec<u32> = candidates
         .iter()
-        .filter(|t| func_rvas.contains(t) && **t != main_rva)
+        .filter(|&&t| Some(t) != main_rva)
         .copied()
         .collect();
 
-    log::debug!("CRT startup direct targets (excluded from user BFS): {:?}",
-        crt_targets.iter().map(|r| format!("0x{:x}", r)).collect::<Vec<_>>());
+    for &seed in &crt_seeds {
+        crt_rvas.insert(seed);
+    }
 
-    // BFS from main to find all reachable user functions,
-    // but do NOT follow calls to CRT startup's direct targets.
-    let mut queue: std::collections::VecDeque<(u32, u32)> = std::collections::VecDeque::new();
-    queue.push_back((main_rva, 0));
-    user_rvas.insert(main_rva);
-
-    // Limit BFS depth for safety: deep callees are likely library internals
-    const MAX_BFS_DEPTH: u32 = 3;
-
-    while let Some((rva, depth)) = queue.pop_front() {
-        if depth >= MAX_BFS_DEPTH {
-            continue;
-        }
+    // BFS from CRT seeds to find all CRT-reachable functions
+    let mut queue: VecDeque<u32> = crt_seeds.into_iter().collect();
+    while let Some(rva) = queue.pop_front() {
         if let Some(func) = func_by_rva.get(&rva) {
             let targets = find_all_e8_targets(&func.code, func.start_rva);
             for target in targets {
                 if func_rvas.contains(&target)
-                    && !user_rvas.contains(&target)
-                    && !crt_targets.contains(&target)
+                    && !crt_rvas.contains(&target)
+                    && Some(target) != main_rva
                 {
-                    user_rvas.insert(target);
-                    queue.push_back((target, depth + 1));
+                    crt_rvas.insert(target);
+                    queue.push_back(target);
+                }
+            }
+        }
+    }
+
+    // Mark main and its DIRECT callees (1-hop) as main-reachable.
+    // Only these get aggressive passes (CFF, dead-code). This is conservative
+    // but safe — library functions called by user code won't get CFF'd.
+    if let Some(main) = main_rva {
+        main_reachable.insert(main);
+        if let Some(main_func) = func_by_rva.get(&main) {
+            let direct_targets = find_all_e8_targets(&main_func.code, main);
+            for target in direct_targets {
+                if func_rvas.contains(&target) && !crt_rvas.contains(&target) {
+                    main_reachable.insert(target);
                 }
             }
         }
     }
 
     log::info!(
-        "Identified {} user functions reachable from main (out of {})",
-        user_rvas.len(),
+        "Identified {} CRT/runtime, {} main-reachable (out of {})",
+        crt_rvas.len(),
+        main_reachable.len(),
         functions.len()
     );
-    user_rvas
+    (crt_rvas, main_reachable)
 }
 
 /// Count how many local functions are reachable from a given start via BFS on E8 calls.

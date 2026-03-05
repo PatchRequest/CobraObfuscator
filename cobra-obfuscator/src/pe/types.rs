@@ -44,6 +44,10 @@ pub struct PeFunction {
     pub pdata_index: usize,
     /// Whether this is likely a CRT/runtime function (should be skipped).
     pub is_runtime: bool,
+    /// Whether this function is directly reachable from main() via E8 calls.
+    /// Functions not reachable from main (e.g. statically linked library code)
+    /// are still obfuscated but with conservative passes only (no CFF).
+    pub is_main_reachable: bool,
 }
 
 impl PeFunction {

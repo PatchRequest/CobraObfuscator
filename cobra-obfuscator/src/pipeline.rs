@@ -222,6 +222,10 @@ fn pe_function_has_indirect_branches(func: &PeFunction) -> bool {
     false
 }
 
+/// Passes that are only safe on confirmed user code (not library internals).
+/// CFF modifies stack frames which can break libc/runtime functions.
+const AGGRESSIVE_PASSES: &[&str] = &["control-flow-flatten", "dead-code"];
+
 /// Run the obfuscation pipeline on PE functions.
 pub fn run_pe_pipeline(
     functions: &[PeFunction],
@@ -239,9 +243,22 @@ pub fn run_pe_pipeline(
         .filter(|p| !config.disabled_passes.contains(p.name()))
         .collect();
 
+    // Split into safe passes (all functions) and aggressive passes (main-reachable only)
+    let safe_passes: Vec<&dyn ObfuscationPass> = enabled_passes
+        .iter()
+        .filter(|p| !AGGRESSIVE_PASSES.contains(&p.name()))
+        .map(|p| p.as_ref())
+        .collect();
+    let aggressive_passes: Vec<&dyn ObfuscationPass> = enabled_passes
+        .iter()
+        .filter(|p| AGGRESSIVE_PASSES.contains(&p.name()))
+        .map(|p| p.as_ref())
+        .collect();
+
     log::info!(
-        "Enabled passes: {:?}",
-        enabled_passes.iter().map(|p| p.name()).collect::<Vec<_>>()
+        "Enabled passes: {:?} (aggressive: {:?})",
+        enabled_passes.iter().map(|p| p.name()).collect::<Vec<_>>(),
+        aggressive_passes.iter().map(|p| p.name()).collect::<Vec<_>>()
     );
 
     let mut ctx = PassContext {
@@ -281,7 +298,15 @@ pub fn run_pe_pipeline(
         let target_rva = cobra_section_rva + current_offset;
         let target_va = image_base + target_rva as u64;
 
-        match process_pe_function(func, image_base, target_va, &enabled_passes, &mut ctx, config) {
+        // Use all passes for main-reachable functions, safe-only for library code
+        let passes: Vec<&dyn ObfuscationPass> = if func.is_main_reachable {
+            safe_passes.iter().chain(aggressive_passes.iter()).copied().collect()
+        } else {
+            log::debug!("  {} — not main-reachable, skipping CFF", func.name);
+            safe_passes.clone()
+        };
+
+        match process_pe_function_dyn(func, image_base, target_va, &passes, &mut ctx, config) {
             Ok(code) => {
                 log::info!(
                     "  {} -> {} bytes (was {})",
@@ -412,12 +437,36 @@ pub fn run_pe_pipeline_inplace(
     Ok(results)
 }
 
+/// Process a single PE function through decode → passes → encode (dynamic dispatch).
+fn process_pe_function_dyn(
+    func: &PeFunction,
+    image_base: u64,
+    target_va: u64,
+    passes: &[&dyn ObfuscationPass],
+    ctx: &mut PassContext,
+    config: &ObfuscatorConfig,
+) -> Result<Vec<u8>> {
+    process_pe_function_impl(func, image_base, target_va, passes, ctx, config)
+}
+
 /// Process a single PE function through decode → passes → encode.
 fn process_pe_function(
     func: &PeFunction,
     image_base: u64,
     target_va: u64,
     passes: &[Box<dyn ObfuscationPass>],
+    ctx: &mut PassContext,
+    config: &ObfuscatorConfig,
+) -> Result<Vec<u8>> {
+    let pass_refs: Vec<&dyn ObfuscationPass> = passes.iter().map(|p| p.as_ref()).collect();
+    process_pe_function_impl(func, image_base, target_va, &pass_refs, ctx, config)
+}
+
+fn process_pe_function_impl(
+    func: &PeFunction,
+    image_base: u64,
+    target_va: u64,
+    passes: &[&dyn ObfuscationPass],
     ctx: &mut PassContext,
     config: &ObfuscatorConfig,
 ) -> Result<Vec<u8>> {
