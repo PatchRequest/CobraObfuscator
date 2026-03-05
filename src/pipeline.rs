@@ -147,6 +147,8 @@ pub struct ObfuscationStats {
     pub output_code_bytes: u64,
     /// Whether in-place mode was used.
     pub inplace: bool,
+    /// Number of strings encrypted in .rdata.
+    pub encrypted_strings: u32,
 }
 
 impl ObfuscationStats {
@@ -179,9 +181,12 @@ impl std::fmt::Display for ObfuscationStats {
         writeln!(f, "  Obfuscated code:     {} bytes ({:.2}x)", self.output_code_bytes, self.expansion_ratio())?;
         writeln!(f, "  .text coverage:      {:.1}%", self.text_coverage_pct())?;
         if self.inplace {
-            write!(f, "  Mode:                in-place")?;
+            writeln!(f, "  Mode:                in-place")?;
         } else {
-            write!(f, "  Mode:                scatter")?;
+            writeln!(f, "  Mode:                scatter")?;
+        }
+        if self.encrypted_strings > 0 {
+            write!(f, "  Encrypted strings:   {}", self.encrypted_strings)?;
         }
         Ok(())
     }

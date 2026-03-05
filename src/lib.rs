@@ -66,6 +66,7 @@ fn compute_stats_from_ir(
         obfuscated_bytes,
         output_code_bytes,
         inplace: false,
+        encrypted_strings: 0,
     }
 }
 
@@ -99,6 +100,7 @@ fn compute_stats(
         obfuscated_bytes,
         output_code_bytes,
         inplace,
+        encrypted_strings: 0,
     }
 }
 
@@ -136,7 +138,7 @@ pub fn obfuscate_pe(input: &[u8], config: &ObfuscatorConfig) -> Result<(Vec<u8>,
         s.name == "_RDATA" || s.name == ".gfids" || s.name == ".fptable"
     });
 
-    if is_msvc {
+    let (mut output, mut stats) = if is_msvc {
         // MSVC: use direct pipeline (encode at correct VA from start)
         log::info!("MSVC binary detected — using direct extension mode");
         let obfuscated = pipeline::run_pe_pipeline(
@@ -154,7 +156,7 @@ pub fn obfuscate_pe(input: &[u8], config: &ObfuscatorConfig) -> Result<(Vec<u8>,
             .context("Failed to write PE output")?;
 
         log::info!("Output PE: {} bytes", output.len());
-        Ok((output, stats))
+        (output, stats)
     } else {
         // GCC/Clang/Rust: use scatter pipeline (cave placement + re-encoding)
         let mut obfuscated = pipeline::run_pe_pipeline_with_ir(
@@ -171,8 +173,17 @@ pub fn obfuscate_pe(input: &[u8], config: &ObfuscatorConfig) -> Result<(Vec<u8>,
             .context("Failed to write PE output")?;
 
         log::info!("Output PE: {} bytes", output.len());
-        Ok((output, stats))
+        (output, stats)
+    };
+
+    // String encryption (post-processing on the output buffer)
+    if config.encrypt_strings {
+        let seed = config.seed.unwrap_or_else(|| rand::random());
+        stats.encrypted_strings = pe::strings::apply_string_encryption(&mut output, &pe_file, seed)
+            .context("String encryption failed")?;
     }
+
+    Ok((output, stats))
 }
 
 /// Read a PE binary, obfuscate functions in-place (no new section), and return the patched PE.

@@ -34,6 +34,10 @@ struct Args {
     #[arg(long, default_value = "0.3")]
     junk_density: f64,
 
+    /// Encrypt strings in .rdata (XOR + startup decryptor)
+    #[arg(long)]
+    encrypt_strings: bool,
+
     /// Input format: "auto" (default), "coff", or "pe"
     #[arg(long, default_value = "auto")]
     format: String,
@@ -49,6 +53,7 @@ fn main() -> Result<()> {
         disabled_passes: args.disable.into_iter().collect::<HashSet<_>>(),
         seed: args.seed,
         junk_density: args.junk_density.clamp(0.0, 1.0),
+        encrypt_strings: args.encrypt_strings,
     };
 
     let input_data =

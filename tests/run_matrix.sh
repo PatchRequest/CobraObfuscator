@@ -151,7 +151,7 @@ run_test() {
 
     TOTAL=$((TOTAL + 1))
 
-    local cmd="$COBRA -i $input_exe -o $out_exe --seed $seed"
+    local cmd="$COBRA -i $input_exe -o $out_exe --seed $seed --encrypt-strings"
     [ -n "$disable_flags" ] && cmd="$cmd --disable $disable_flags"
 
     if ! eval "$cmd" >/dev/null 2>&1; then
