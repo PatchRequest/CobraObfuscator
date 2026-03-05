@@ -9,9 +9,11 @@
 
 # Cobra Obfuscator
 
-**Post-compilation x86-64 binary obfuscator for Windows PE executables.**
+**Post-compilation x86-64 binary obfuscator for Windows PE executables and DLLs.**
 
 Cobra operates directly on compiled `.exe` and `.dll` binaries — no source code, no recompilation, no compiler plugins. Hand it a PE binary and it produces an obfuscated copy with a new `.cobra` code section containing transformed function bodies.
+
+Supports binaries compiled with **GCC (MinGW)**, **Clang**, **MSVC**, **Rust**, and **Go**.
 
 ## Features
 
@@ -27,16 +29,24 @@ Adds unreachable code blocks guarded by opaque predicates (`cmp rsp, 0; je ...` 
 ### Instruction Substitution
 Replaces instructions with semantically equivalent alternatives. Breaks byte-level signatures while preserving exact program semantics.
 
+### Intelligent CRT Detection
+Automatically identifies CRT/runtime functions via inverted call graph analysis — BFS from the entry point marks runtime code, everything else is user code. Aggressive passes (CFF, dead-code) are only applied to confirmed user functions, preventing breakage of statically-linked library code.
+
+### Obfuscation Statistics
+Reports detailed metrics after each run: .text coverage, function counts, expansion ratio, and pass breakdown.
+
 ### Seed-Based Reproducibility
 All transforms use a seeded PRNG. Same seed, same output — useful for debugging, CI, and deterministic builds.
 
 ## How It Works
 
 1. **Parse** the PE binary — reads section headers, `.pdata` exception table, relocations
-2. **Discover** functions via BFS from the entry point through the call graph
-3. **Filter** — skips CRT/runtime functions, tiny stubs, and functions with indirect branches (jump tables)
+2. **Discover** functions via `.pdata` RUNTIME_FUNCTION entries
+3. **Classify** — inverted CRT detection identifies runtime vs user functions via call graph BFS from entry point
 4. **Lift** each function into an IR (basic blocks + CFG)
-5. **Transform** — runs the pass pipeline: `insn_substitution → junk_insertion → dead_code → control_flow_flatten`
+5. **Transform** — runs the pass pipeline with per-function pass selection:
+   - All user functions: `insn_substitution → junk_insertion`
+   - Main-reachable functions: additionally `dead_code → control_flow_flatten`
 6. **Encode** transformed functions into machine code
 7. **Emit** a new `.cobra` section containing all obfuscated function bodies
 8. **Patch** original functions with `jmp` trampolines redirecting into `.cobra`
@@ -44,8 +54,9 @@ All transforms use a seeded PRNG. Same seed, same output — useful for debuggin
 ## Usage
 
 ```bash
-# Basic usage
+# Basic usage — works on .exe and .dll
 cobra-obfuscator -i target.exe -o target_obf.exe
+cobra-obfuscator -i library.dll -o library_obf.dll
 
 # With a fixed seed for reproducibility
 cobra-obfuscator -i target.exe -o target_obf.exe --seed 42
@@ -91,28 +102,42 @@ The binary lands in `target/release/cobra-obfuscator.exe`.
 
 ## Test Suite
 
-The test matrix covers **8,580 configurations** across:
+The test matrix covers multiple compilers, optimization levels, pass combinations, and seeds:
 
-- **3 compilers** — GCC (MinGW), Clang (MinGW target), MSVC (cl.exe)
-- **5 optimization levels** — `-O0`, `-O1`, `-O2`, `-Os`, `-O3` (GCC/Clang) + `/Od`, `/O1`, `/O2` (MSVC)
-- **6 test programs** — minimal, medium, loops, recursion, switch_heavy, selfval
+- **Compilers** — GCC (MinGW), Clang (MinGW target), MSVC (cl.exe), Rust (debug + release), Go
+- **Optimization levels** — `-O0` through `-O3`, `-Os` (GCC/Clang), `/Od`, `/O1`, `/O2` (MSVC)
+- **9 C test programs** — minimal, medium, loops, recursion, switch_heavy, selfval, bitops, structs, func_ptrs
+- **2 Rust test programs** — rust_crypto, rust_structs (debug + release builds)
+- **2 Go test programs** — go_algorithms, go_crypto
+- **DLL tests** — C DLL and Rust cdylib with loader programs that validate exported functions
 - **11 pass combinations** — all passes, each pass solo, pairwise combos, triple combos
 - **10 seeds** per configuration
 
-Test programs exercise: deep nesting, mutual recursion, Ackermann function, binary exponentiation, bubble sort, state machines, large/sparse/nested switch statements, heap allocation, TLS callbacks, threading, VEH, and WinAPI calls.
+Test programs exercise: deep nesting, mutual recursion, Ackermann function, binary exponentiation, bubble sort, state machines, large/sparse/nested switch statements, heap allocation, function pointers, bitwise operations, structs, hashing, sorting, primality testing, and cryptographic operations.
 
 ```bash
 # Run the full matrix (auto-detects available compilers)
 cd tests && bash run_matrix.sh
 ```
 
+### Coverage
+
+| Target | .text Coverage | Status |
+|--------|---------------|--------|
+| C (GCC, 9 programs) | 58–63% | All pass |
+| Rust (debug + release) | 76–84% | All pass |
+| C DLL (GCC) | ~68% | All pass |
+| Rust DLL (cdylib) | ~80% | All pass |
+| Large binaries (8MB+) | ~74% | Tested |
+
 ## Architecture
 
 ```
 src/
 ├── main.rs              CLI entry point
+├── lib.rs               Library API
 ├── config.rs            ObfuscatorConfig
-├── pipeline.rs          Orchestrates PE/COFF obfuscation
+├── pipeline.rs          Orchestrates PE/COFF obfuscation + statistics
 ├── passes/
 │   ├── pass_trait.rs    ObfuscationPass trait + PassContext
 │   ├── control_flow_flatten.rs
@@ -126,12 +151,16 @@ src/
 │   ├── cfg.rs           CFG construction
 │   └── relocation.rs    Relocation tracking
 ├── pe/
-│   ├── reader.rs        PE parsing, function discovery
+│   ├── reader.rs        PE parsing, function discovery, CRT detection
 │   ├── writer.rs        .cobra section creation + trampolines
 │   ├── pdata.rs         Exception table parsing
 │   └── reloc.rs         PE relocation handling
+├── coff/
+│   ├── reader.rs        COFF object file parsing
+│   ├── writer.rs        COFF output
+│   └── types.rs         COFF data structures
 └── encode/
-    ├── assembler.rs     IR → machine code
+    ├── assembler.rs     IR → machine code (BlockEncoder)
     └── reloc_fixup.rs   Post-encode relocation validation
 ```
 
@@ -141,6 +170,7 @@ src/
 - **Windows PE only** — no ELF/Mach-O (yet)
 - Functions with jump tables (indirect branches) are skipped to preserve correctness
 - CRT/runtime functions are intentionally excluded from transformation
+- Go binaries: obfuscation runs but runtime metadata (.gopclntab) is not patched, so obfuscated Go binaries may crash
 
 ## License
 
