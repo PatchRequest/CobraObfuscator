@@ -30,8 +30,16 @@ pub fn encode_function(func: &Function, base_address: u64) -> Result<EncodedFunc
     let instructions: Vec<iced_x86::Instruction> = all_insns.iter().map(|i| i.instruction).collect();
 
     let block = InstructionBlock::new(&instructions, base_address);
-    let result = BlockEncoder::encode(64, block, BlockEncoderOptions::NONE)
-        .context("BlockEncoder failed to encode instructions")?;
+    let result = match BlockEncoder::encode(64, block, BlockEncoderOptions::NONE) {
+        Ok(r) => r,
+        Err(e) => {
+            log::debug!(
+                "BlockEncoder failed for {} ({} insns at 0x{:x}): {}",
+                func.name, instructions.len(), base_address, e
+            );
+            anyhow::bail!("BlockEncoder failed: {}", e);
+        }
+    };
 
     let code = result.code_buffer;
 

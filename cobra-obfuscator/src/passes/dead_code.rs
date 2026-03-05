@@ -81,11 +81,18 @@ impl ObfuscationPass for DeadCodeInsertion {
                 .map(|insn| insn.instruction.ip())
                 .unwrap_or(0);
 
-            let existing: Vec<IrInsn> = func.blocks[i].instructions.drain(..).collect();
+            let mut existing: Vec<IrInsn> = func.blocks[i].instructions.drain(..).collect();
             func.blocks[i].instructions = predicate_insns;
             if original_first_ip != 0 {
+                // Transfer the block's entry IP to the opaque predicate so branches
+                // targeting this block land on the cmp instruction.
                 if let Some(first) = func.blocks[i].instructions.first_mut() {
                     first.instruction.set_ip(original_first_ip);
+                }
+                // Clear the IP on the original first instruction to avoid duplicate IPs
+                // (BlockEncoder requires unique IPs for branch resolution).
+                if let Some(orig_first) = existing.first_mut() {
+                    orig_first.instruction.set_ip(0);
                 }
             }
             func.blocks[i].instructions.extend(existing);

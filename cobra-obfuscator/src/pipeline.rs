@@ -128,6 +128,65 @@ fn process_code_section(
     Ok((encoded.code, relocs))
 }
 
+/// Statistics about the obfuscation run.
+#[derive(Debug, Clone)]
+pub struct ObfuscationStats {
+    /// Total size of executable sections (.text) in the binary.
+    pub text_section_bytes: u64,
+    /// Total number of functions discovered via .pdata.
+    pub total_functions: u32,
+    /// Number of functions classified as runtime/CRT (skipped).
+    pub runtime_functions: u32,
+    /// Number of functions successfully obfuscated.
+    pub obfuscated_functions: u32,
+    /// Number of functions skipped (too small, indirect branches, errors, grew too large).
+    pub skipped_functions: u32,
+    /// Sum of original sizes of obfuscated functions (bytes replaced).
+    pub obfuscated_bytes: u64,
+    /// Sum of obfuscated output code sizes.
+    pub output_code_bytes: u64,
+    /// Whether in-place mode was used.
+    pub inplace: bool,
+}
+
+impl ObfuscationStats {
+    /// Percentage of .text section bytes that were obfuscated.
+    pub fn text_coverage_pct(&self) -> f64 {
+        if self.text_section_bytes == 0 {
+            return 0.0;
+        }
+        self.obfuscated_bytes as f64 / self.text_section_bytes as f64 * 100.0
+    }
+
+    /// Average code expansion ratio.
+    pub fn expansion_ratio(&self) -> f64 {
+        if self.obfuscated_bytes == 0 {
+            return 1.0;
+        }
+        self.output_code_bytes as f64 / self.obfuscated_bytes as f64
+    }
+}
+
+impl std::fmt::Display for ObfuscationStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "--- Obfuscation Statistics ---")?;
+        writeln!(f, "  .text size:          {} bytes", self.text_section_bytes)?;
+        writeln!(f, "  Functions total:     {}", self.total_functions)?;
+        writeln!(f, "    Runtime (skipped): {}", self.runtime_functions)?;
+        writeln!(f, "    Obfuscated:        {}", self.obfuscated_functions)?;
+        writeln!(f, "    Skipped:           {}", self.skipped_functions)?;
+        writeln!(f, "  Original code:       {} bytes", self.obfuscated_bytes)?;
+        writeln!(f, "  Obfuscated code:     {} bytes ({:.2}x)", self.output_code_bytes, self.expansion_ratio())?;
+        writeln!(f, "  .text coverage:      {:.1}%", self.text_coverage_pct())?;
+        if self.inplace {
+            write!(f, "  Mode:                in-place")?;
+        } else {
+            write!(f, "  Mode:                trampoline (.cobra section)")?;
+        }
+        Ok(())
+    }
+}
+
 /// Result of obfuscating a single PE function.
 #[derive(Debug)]
 pub struct ObfuscatedFunction {
