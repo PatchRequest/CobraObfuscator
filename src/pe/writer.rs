@@ -3,93 +3,56 @@ use anyhow::{bail, Context, Result};
 use super::types::PeFile;
 use crate::pipeline::ObfuscatedFunction;
 
-/// Section header size.
-const SECTION_HEADER_SIZE: usize = 40;
-
-/// IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ
-const CODE_SECTION_CHARACTERISTICS: u32 = 0x60000020;
+/// IMAGE_SCN_MEM_EXECUTE
+const IMAGE_SCN_MEM_EXECUTE: u32 = 0x20000000;
+/// IMAGE_SCN_CNT_CODE
+const IMAGE_SCN_CNT_CODE: u32 = 0x00000020;
 
 /// Align a value up to the given alignment.
 fn align_up(value: u32, alignment: u32) -> u32 {
     (value + alignment - 1) & !(alignment - 1)
 }
 
-/// Layout for the new code section appended at end of file.
+/// Layout for appending obfuscated code to the last section.
 pub struct TextExpansionLayout {
-    pub header_offset: usize,
+    /// Index of the last section we'll extend.
+    pub section_index: usize,
+    /// RVA where the new code starts (after existing virtual data of last section).
     pub virtual_address: u32,
+    /// File offset where the new code is appended.
     pub raw_offset: u32,
 }
 
-/// Calculate where to place the new code section.
+/// Calculate layout for appending obfuscated code to the last section.
 ///
-/// Appends after all existing sections. Uses a normal-looking section name
-/// (`.text1` for MinGW/GCC binaries, `.textbss` for MSVC-style).
+/// No new section header is created. The last section is extended to hold
+/// the obfuscated code, and its characteristics are updated to include execute.
 pub fn calculate_text_expansion(pe: &PeFile) -> Result<TextExpansionLayout> {
-    let last_section = pe
-        .sections
-        .last()
-        .context("PE has no sections")?;
+    let last_idx = pe.sections.len() - 1;
+    let last = &pe.sections[last_idx];
 
-    let next_va = align_up(
-        last_section.virtual_address + last_section.virtual_size,
-        pe.section_alignment,
-    );
+    // The section maps raw_size bytes from raw_offset to virtual_address.
+    // Our code will be at offset raw_size within the section's raw data,
+    // which maps to VA = virtual_address + raw_size.
+    // We use raw_size (not virtual_size) because the loader maps from the file.
+    let code_va = last.virtual_address + last.raw_size;
 
-    let next_raw = align_up(
-        last_section.raw_offset + last_section.raw_size,
-        pe.file_alignment,
-    );
-
-    // Check if there's room for a new section header
-    let last_header_end = last_section.header_offset + SECTION_HEADER_SIZE;
-    let new_header_offset = last_header_end;
-    let new_header_end = new_header_offset + SECTION_HEADER_SIZE;
-
-    let first_raw_data = pe
-        .sections
-        .iter()
-        .filter(|s| s.raw_size > 0)
-        .map(|s| s.raw_offset as usize)
-        .min()
-        .unwrap_or(pe.size_of_headers as usize);
-
-    if new_header_end > first_raw_data {
-        bail!(
-            "No room for new section header: headers end at 0x{:x}, first section data at 0x{:x}",
-            new_header_end,
-            first_raw_data
-        );
-    }
+    // Append right after the last section's raw data in the file
+    let raw_offset = last.raw_offset + last.raw_size;
 
     Ok(TextExpansionLayout {
-        header_offset: new_header_offset,
-        virtual_address: next_va,
-        raw_offset: next_raw,
+        section_index: last_idx,
+        virtual_address: code_va,
+        raw_offset,
     })
 }
 
-/// Pick a benign-looking section name based on existing sections.
-fn pick_section_name(pe: &PeFile) -> &'static [u8; 8] {
-    let names: Vec<&str> = pe.sections.iter().map(|s| s.name.as_str()).collect();
-
-    // If there's already a .text, use .text1 (common in multi-TU builds)
-    if names.contains(&".text") && !names.contains(&".text1") {
-        return b".text1\0\0";
-    }
-    // MSVC-style alternatives
-    if !names.contains(&".textbss") {
-        return b".textbss";
-    }
-    if !names.contains(&".text0") {
-        return b".text0\0\0";
-    }
-    // Fallback
-    b".rtext\0\0"
-}
-
-/// Write the obfuscated PE: add a code section with a normal-looking name,
-/// patch trampolines, fix headers.
+/// Write the obfuscated PE by extending the last section.
+///
+/// Obfuscated code is appended after the last section's raw data. The last
+/// section header is updated to cover the new code with execute permissions.
+/// No new section is added — from the outside, it just looks like the last
+/// section is larger.
 pub fn write_pe(
     pe: &PeFile,
     obfuscated: &[ObfuscatedFunction],
@@ -98,6 +61,8 @@ pub fn write_pe(
     if obfuscated.is_empty() {
         bail!("No functions were obfuscated");
     }
+
+    let last = &pe.sections[layout.section_index];
 
     // Concatenate all obfuscated code
     let mut code_data = Vec::new();
@@ -109,59 +74,59 @@ pub fn write_pe(
         code_data.extend_from_slice(&func.code);
     }
 
-    let virtual_size = code_data.len() as u32;
-    let raw_size = align_up(virtual_size, pe.file_alignment);
+    let code_size = code_data.len() as u32;
 
-    // Pad to file alignment with int3
-    code_data.resize(raw_size as usize, 0xCC);
+    // New raw size = old raw size + code, file-aligned
+    let new_raw_size = align_up(last.raw_size + code_size, pe.file_alignment);
+    // New virtual size must cover at least the new raw size
+    let new_virtual_size = std::cmp::max(last.virtual_size, new_raw_size);
 
-    // Build output
-    let insert_at = layout.raw_offset as usize;
-    let mut output = Vec::with_capacity(pe.data.len() + code_data.len());
-    output.extend_from_slice(&pe.data[..insert_at]);
+    // Build output: append code right after last section's raw data
+    let append_at = layout.raw_offset as usize;
+    let append_size = (new_raw_size - last.raw_size) as usize;
+
+    let mut output = Vec::with_capacity(pe.data.len() + append_size);
+    output.extend_from_slice(&pe.data[..append_at]);
+    code_data.resize(append_size, 0xCC); // pad to file alignment
     output.extend_from_slice(&code_data);
-    if insert_at < pe.data.len() {
-        output.extend_from_slice(&pe.data[insert_at..]);
+    if append_at < pe.data.len() {
+        output.extend_from_slice(&pe.data[append_at..]);
     }
 
-    // 1. Write section header with a normal-looking name
-    let section_name = pick_section_name(pe);
-    let mut header = [0u8; SECTION_HEADER_SIZE];
-    header[0..8].copy_from_slice(section_name);
-    header[8..12].copy_from_slice(&virtual_size.to_le_bytes());
-    header[12..16].copy_from_slice(&layout.virtual_address.to_le_bytes());
-    header[16..20].copy_from_slice(&raw_size.to_le_bytes());
-    header[20..24].copy_from_slice(&layout.raw_offset.to_le_bytes());
-    header[36..40].copy_from_slice(&CODE_SECTION_CHARACTERISTICS.to_le_bytes());
+    // 1. Update last section header
+    let sh = last.header_offset;
 
-    output[layout.header_offset..layout.header_offset + SECTION_HEADER_SIZE]
-        .copy_from_slice(&header);
+    // Expand virtual size
+    output[sh + 8..sh + 12].copy_from_slice(&new_virtual_size.to_le_bytes());
 
-    // 2. Patch NumberOfSections
-    let new_section_count = pe.number_of_sections + 1;
-    output[pe.number_of_sections_offset..pe.number_of_sections_offset + 2]
-        .copy_from_slice(&new_section_count.to_le_bytes());
+    // Expand raw size
+    output[sh + 16..sh + 20].copy_from_slice(&new_raw_size.to_le_bytes());
 
-    // 3. Patch SizeOfImage
+    // Add execute + code characteristics
+    let new_chars = last.characteristics | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_CNT_CODE;
+    output[sh + 36..sh + 40].copy_from_slice(&new_chars.to_le_bytes());
+
+    // 2. Update SizeOfImage
     let new_size_of_image = align_up(
-        layout.virtual_address + virtual_size,
+        last.virtual_address + new_virtual_size,
         pe.section_alignment,
     );
     output[pe.size_of_image_offset..pe.size_of_image_offset + 4]
         .copy_from_slice(&new_size_of_image.to_le_bytes());
 
-    // 4. Patch SizeOfCode
+    // 3. Update SizeOfCode
     let old_size_of_code =
         u32::from_le_bytes(output[pe.size_of_code_offset..pe.size_of_code_offset + 4].try_into().unwrap());
-    let new_size_of_code = old_size_of_code + raw_size;
+    let new_size_of_code = old_size_of_code + (new_raw_size - last.raw_size);
     output[pe.size_of_code_offset..pe.size_of_code_offset + 4]
         .copy_from_slice(&new_size_of_code.to_le_bytes());
 
-    // 5. Zero checksum
+    // 4. Zero checksum
     output[pe.checksum_offset..pe.checksum_offset + 4].copy_from_slice(&0u32.to_le_bytes());
 
-    // 6. Write trampolines over original function bodies
+    // 5. Write trampolines over original function bodies
     for &(original_rva, original_size, offset_in_code) in &function_offsets {
+        // Code is at layout.virtual_address + offset
         let target_rva = layout.virtual_address + offset_in_code;
 
         let file_offset = pe
@@ -189,11 +154,9 @@ pub fn write_pe(
 
     log::warn!("PE checksum zeroed — Authenticode signature (if present) is invalidated");
 
-    let name_str = std::str::from_utf8(section_name).unwrap_or("?").trim_end_matches('\0');
     log::info!(
-        "Added {} section: VA=0x{:x}, size={}, {} functions trampolined",
-        name_str,
-        layout.virtual_address,
+        "Extended {} section: +{} bytes ({} functions trampolined)",
+        last.name,
         code_data.len(),
         function_offsets.len()
     );
