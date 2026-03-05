@@ -44,6 +44,9 @@ Three placement modes keep obfuscated code hidden within existing PE structure:
 
 No new sections are added. No suspicious section names.
 
+### String Encryption
+Encrypts string literals in `.rdata` with per-string XOR keys. A generated decryptor stub runs at startup (before CRT) to restore strings in memory. On disk, `strings` and static analysis tools see only ciphertext. Automatically discovers string references via `LEA [rip+disp32]` scanning and skips PE metadata (import/export names, debug info).
+
 ### Seed-Based Reproducibility
 All transforms use a seeded PRNG. Same seed, same output — useful for debugging, CI, and deterministic builds.
 
@@ -59,6 +62,7 @@ All transforms use a seeded PRNG. Same seed, same output — useful for debuggin
 6. **Encode** transformed functions into machine code
 7. **Scatter** obfuscated code into caves within `.text` — original function bodies, inter-function padding, and overflow appended to the last section
 8. **Patch** original functions with `jmp` trampolines redirecting to their new locations
+9. **Encrypt strings** (optional) — XOR-encrypt `.rdata` string literals + hook entry point to decryptor
 
 ## Usage
 
@@ -78,6 +82,9 @@ cobra-obfuscator -i target.exe -o target_obf.exe --iterations 2
 
 # Adjust junk density (0.0–1.0)
 cobra-obfuscator -i target.exe -o target_obf.exe --junk-density 0.5
+
+# Encrypt strings in .rdata
+cobra-obfuscator -i target.exe -o target_obf.exe --encrypt-strings
 ```
 
 ### CLI Options
@@ -90,6 +97,7 @@ cobra-obfuscator -i target.exe -o target_obf.exe --junk-density 0.5
 | `--iterations` | Number of pass iterations | `1` |
 | `--disable` | Comma-separated passes to skip | none |
 | `--junk-density` | Junk insertion probability (0.0–1.0) | `0.3` |
+| `--encrypt-strings` | XOR-encrypt `.rdata` strings + startup decryptor | off |
 | `--format` | Force input format: `auto`, `coff`, `pe` | `auto` |
 
 ### Pass Names (for `--disable`)
@@ -168,6 +176,7 @@ src/
 │   ├── writer.rs        Scatter/extension/in-place writers + trampolines
 │   ├── pdata.rs         Exception table parsing
 │   ├── reloc.rs         PE relocation handling
+│   ├── strings.rs       String encryption + decryptor generation
 │   └── types.rs         PE data structures
 ├── coff/
 │   ├── reader.rs        COFF object file parsing
