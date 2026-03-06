@@ -568,7 +568,7 @@ cat "$JOBLIST" | xargs -P "$MAX_JOBS" -I{} bash -c '
         obf_dll="$OBF_DIR/${out_name}.dll"
         result_file="$JOB_RESULTS_DIR/${out_name}.result"
 
-        cmd="$COBRA -i $dll_bin -o $obf_dll --seed $seed --encrypt-strings"
+        cmd="$COBRA -i $dll_bin -o $obf_dll --seed $seed --encrypt-strings --fluctuate"
         [ -n "$disable_flags" ] && cmd="$cmd --disable $disable_flags"
 
         if ! eval "$cmd" >/dev/null 2>&1; then
@@ -603,7 +603,7 @@ cat "$JOBLIST" | xargs -P "$MAX_JOBS" -I{} bash -c '
         out_exe="$OBF_DIR/${out_name}.exe"
         result_file="$JOB_RESULTS_DIR/${out_name}.result"
 
-        cmd="$COBRA -i $input_exe -o $out_exe --seed $seed --encrypt-strings"
+        cmd="$COBRA -i $input_exe -o $out_exe --seed $seed --encrypt-strings --fluctuate"
         [ -n "$disable_flags" ] && cmd="$cmd --disable $disable_flags"
 
         if ! eval "$cmd" >/dev/null 2>&1; then

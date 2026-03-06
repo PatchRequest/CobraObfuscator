@@ -38,9 +38,13 @@ struct Args {
     #[arg(long)]
     encrypt_strings: bool,
 
-    /// Hide imports (replace IAT with runtime resolution)
+    /// PE Fluctuation: encrypt .text at runtime, decrypt on-demand via VEH
     #[arg(long)]
-    hide_imports: bool,
+    fluctuate: bool,
+
+    /// Fluctuation re-encrypt delay in milliseconds (default: 2000)
+    #[arg(long, default_value = "2000")]
+    fluctuation_delay: u32,
 
     /// Input format: "auto" (default), "coff", or "pe"
     #[arg(long, default_value = "auto")]
@@ -58,7 +62,8 @@ fn main() -> Result<()> {
         seed: args.seed,
         junk_density: args.junk_density.clamp(0.0, 1.0),
         encrypt_strings: args.encrypt_strings,
-        hide_imports: args.hide_imports,
+        fluctuate: args.fluctuate,
+        fluctuation_delay_ms: args.fluctuation_delay,
     };
 
     let input_data =

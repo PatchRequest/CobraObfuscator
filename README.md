@@ -47,8 +47,10 @@ No new sections are added. No suspicious section names.
 ### String Encryption
 Encrypts string literals in `.rdata` with per-string XOR keys. A generated decryptor stub runs at startup (before CRT) to restore strings in memory. On disk, `strings` and static analysis tools see only ciphertext. Automatically discovers string references via `LEA [rip+disp32]` scanning and skips PE metadata (import/export names, debug info).
 
-### Import Hiding
-Redirects all IAT (Import Address Table) references to a shadow IAT that is filled at runtime via `LoadLibraryA` + `GetProcAddress`. Function names used for resolution are XOR-encrypted in the binary. A resolver stub runs before the original entry point, dynamically resolving every import and storing the results in the shadow IAT. Static analysis tools can no longer map code to imported functions by following IAT references — the code only touches the opaque shadow IAT.
+### PE Fluctuation
+Encrypts the `.text` section at runtime using a VEH (Vectored Exception Handler) + timer callback system. A setup stub runs at startup to install the handler and schedule an encryption timer. When the timer fires, it XOR-encrypts the entire `.text` section with a 16-byte key and marks it `PAGE_READONLY`. Any execution in `.text` triggers an access violation — the VEH catches it, decrypts, marks `PAGE_EXECUTE_READ`, and schedules re-encryption. The code is only decrypted while actively executing, making memory dumps and runtime analysis significantly harder.
+
+Works on all supported compilers. Automatically finds bootstrap APIs via IAT (falls back to `GetModuleHandleW`/`GetModuleHandleA` when `LoadLibraryA` is not imported).
 
 ### Seed-Based Reproducibility
 All transforms use a seeded PRNG. Same seed, same output — useful for debugging, CI, and deterministic builds.
@@ -66,7 +68,7 @@ All transforms use a seeded PRNG. Same seed, same output — useful for debuggin
 7. **Scatter** obfuscated code into caves within `.text` — original function bodies, inter-function padding, and overflow appended to the last section
 8. **Patch** original functions with `jmp` trampolines redirecting to their new locations
 9. **Encrypt strings** (optional) — XOR-encrypt `.rdata` string literals + hook entry point to decryptor
-10. **Hide imports** (optional) — patch IAT references to shadow IAT, generate resolver stub, hook entry point
+10. **PE Fluctuation** (optional) — install VEH + timer to encrypt/decrypt `.text` at runtime
 
 ## Usage
 
@@ -90,11 +92,11 @@ cobra-obfuscator -i target.exe -o target_obf.exe --junk-density 0.5
 # Encrypt strings in .rdata
 cobra-obfuscator -i target.exe -o target_obf.exe --encrypt-strings
 
-# Hide imports (shadow IAT + runtime resolution)
-cobra-obfuscator -i target.exe -o target_obf.exe --hide-imports
+# PE Fluctuation (runtime .text encryption via VEH)
+cobra-obfuscator -i target.exe -o target_obf.exe --fluctuate
 
-# Full protection — all passes + string encryption + import hiding
-cobra-obfuscator -i target.exe -o target_obf.exe --encrypt-strings --hide-imports
+# Full protection — all passes + string encryption + PE fluctuation
+cobra-obfuscator -i target.exe -o target_obf.exe --encrypt-strings --fluctuate
 ```
 
 ### CLI Options
@@ -108,7 +110,8 @@ cobra-obfuscator -i target.exe -o target_obf.exe --encrypt-strings --hide-import
 | `--disable` | Comma-separated passes to skip | none |
 | `--junk-density` | Junk insertion probability (0.0–1.0) | `0.3` |
 | `--encrypt-strings` | XOR-encrypt `.rdata` strings + startup decryptor | off |
-| `--hide-imports` | Redirect IAT to shadow IAT with runtime resolution | off |
+| `--fluctuate` | Runtime `.text` encryption via VEH + timer | off |
+| `--fluctuation-delay` | Re-encrypt delay in milliseconds | `2000` |
 | `--format` | Force input format: `auto`, `coff`, `pe` | `auto` |
 
 ### Pass Names (for `--disable`)
@@ -193,7 +196,7 @@ src/
 │   ├── pdata.rs         Exception table parsing
 │   ├── reloc.rs         PE relocation handling
 │   ├── strings.rs       String encryption + decryptor generation
-│   ├── imports.rs       Import hiding + shadow IAT + resolver generation
+│   ├── fluctuation.rs   PE Fluctuation — VEH + timer runtime .text encryption
 │   └── types.rs         PE data structures
 ├── coff/
 │   ├── reader.rs        COFF object file parsing

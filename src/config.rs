@@ -13,8 +13,10 @@ pub struct ObfuscatorConfig {
     pub junk_density: f64,
     /// Encrypt strings in .rdata with XOR + startup decryptor.
     pub encrypt_strings: bool,
-    /// Hide imports by replacing the IAT with runtime resolution.
-    pub hide_imports: bool,
+    /// PE Fluctuation: encrypt .text at runtime, decrypt on-demand via VEH.
+    pub fluctuate: bool,
+    /// PE Fluctuation delay in milliseconds before re-encrypting .text.
+    pub fluctuation_delay_ms: u32,
 }
 
 impl Default for ObfuscatorConfig {
@@ -25,7 +27,8 @@ impl Default for ObfuscatorConfig {
             seed: None,
             junk_density: 0.3,
             encrypt_strings: false,
-            hide_imports: false,
+            fluctuate: false,
+            fluctuation_delay_ms: 2000,
         }
     }
 }

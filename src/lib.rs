@@ -67,7 +67,6 @@ fn compute_stats_from_ir(
         output_code_bytes,
         inplace: false,
         encrypted_strings: 0,
-        hidden_imports: 0,
     }
 }
 
@@ -102,7 +101,6 @@ fn compute_stats(
         output_code_bytes,
         inplace,
         encrypted_strings: 0,
-        hidden_imports: 0,
     }
 }
 
@@ -185,11 +183,12 @@ pub fn obfuscate_pe(input: &[u8], config: &ObfuscatorConfig) -> Result<(Vec<u8>,
             .context("String encryption failed")?;
     }
 
-    // Import hiding (post-processing, runs after string encryption)
-    if config.hide_imports {
+    // PE Fluctuation (post-processing, runs last — encrypts .text at runtime)
+    if config.fluctuate {
         let seed = config.seed.unwrap_or_else(|| rand::random());
-        stats.hidden_imports = pe::imports::apply_import_hiding(&mut output, &pe_file, seed)
-            .context("Import hiding failed")?;
+        pe::fluctuation::apply_pe_fluctuation(
+            &mut output, &pe_file, seed, config.fluctuation_delay_ms,
+        ).context("PE fluctuation failed")?;
     }
 
     Ok((output, stats))
