@@ -146,6 +146,9 @@ Test programs exercise: deep nesting, mutual recursion, Ackermann function, bina
 ```bash
 # Run the full matrix (auto-detects available compilers)
 cd tests && bash run_matrix.sh
+
+# Override parallelism (defaults to nproc)
+JOBS=12 bash run_matrix.sh
 ```
 
 ### Coverage
@@ -160,7 +163,9 @@ cd tests && bash run_matrix.sh
 | C DLL (GCC) | ~68% | Scatter | All pass |
 | Rust DLL (cdylib) | ~80% | Scatter | All pass |
 
-**13,530 tests** across all compilers, optimization levels, pass combinations, and seeds — all passing.
+**13,750 tests** across all compilers, optimization levels, pass combinations, and seeds — all passing.
+
+The test runner uses **cached compilation** (only rebuilds when sources change) and **parallel execution** via `xargs -P` (saturates all available cores).
 
 ## Architecture
 
