@@ -38,6 +38,10 @@ struct Args {
     #[arg(long)]
     encrypt_strings: bool,
 
+    /// Hide imports (replace IAT with runtime resolution)
+    #[arg(long)]
+    hide_imports: bool,
+
     /// Input format: "auto" (default), "coff", or "pe"
     #[arg(long, default_value = "auto")]
     format: String,
@@ -54,6 +58,7 @@ fn main() -> Result<()> {
         seed: args.seed,
         junk_density: args.junk_density.clamp(0.0, 1.0),
         encrypt_strings: args.encrypt_strings,
+        hide_imports: args.hide_imports,
     };
 
     let input_data =

@@ -13,6 +13,8 @@ pub struct ObfuscatorConfig {
     pub junk_density: f64,
     /// Encrypt strings in .rdata with XOR + startup decryptor.
     pub encrypt_strings: bool,
+    /// Hide imports by replacing the IAT with runtime resolution.
+    pub hide_imports: bool,
 }
 
 impl Default for ObfuscatorConfig {
@@ -23,6 +25,7 @@ impl Default for ObfuscatorConfig {
             seed: None,
             junk_density: 0.3,
             encrypt_strings: false,
+            hide_imports: false,
         }
     }
 }

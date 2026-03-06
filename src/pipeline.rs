@@ -149,6 +149,8 @@ pub struct ObfuscationStats {
     pub inplace: bool,
     /// Number of strings encrypted in .rdata.
     pub encrypted_strings: u32,
+    /// Number of imports hidden via IAT obfuscation.
+    pub hidden_imports: u32,
 }
 
 impl ObfuscationStats {
@@ -186,7 +188,10 @@ impl std::fmt::Display for ObfuscationStats {
             writeln!(f, "  Mode:                scatter")?;
         }
         if self.encrypted_strings > 0 {
-            write!(f, "  Encrypted strings:   {}", self.encrypted_strings)?;
+            writeln!(f, "  Encrypted strings:   {}", self.encrypted_strings)?;
+        }
+        if self.hidden_imports > 0 {
+            write!(f, "  Hidden imports:      {}", self.hidden_imports)?;
         }
         Ok(())
     }

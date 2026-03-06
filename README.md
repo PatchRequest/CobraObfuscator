@@ -47,6 +47,9 @@ No new sections are added. No suspicious section names.
 ### String Encryption
 Encrypts string literals in `.rdata` with per-string XOR keys. A generated decryptor stub runs at startup (before CRT) to restore strings in memory. On disk, `strings` and static analysis tools see only ciphertext. Automatically discovers string references via `LEA [rip+disp32]` scanning and skips PE metadata (import/export names, debug info).
 
+### Import Hiding
+Redirects all IAT (Import Address Table) references to a shadow IAT that is filled at runtime via `LoadLibraryA` + `GetProcAddress`. Function names used for resolution are XOR-encrypted in the binary. A resolver stub runs before the original entry point, dynamically resolving every import and storing the results in the shadow IAT. Static analysis tools can no longer map code to imported functions by following IAT references — the code only touches the opaque shadow IAT.
+
 ### Seed-Based Reproducibility
 All transforms use a seeded PRNG. Same seed, same output — useful for debugging, CI, and deterministic builds.
 
@@ -63,6 +66,7 @@ All transforms use a seeded PRNG. Same seed, same output — useful for debuggin
 7. **Scatter** obfuscated code into caves within `.text` — original function bodies, inter-function padding, and overflow appended to the last section
 8. **Patch** original functions with `jmp` trampolines redirecting to their new locations
 9. **Encrypt strings** (optional) — XOR-encrypt `.rdata` string literals + hook entry point to decryptor
+10. **Hide imports** (optional) — patch IAT references to shadow IAT, generate resolver stub, hook entry point
 
 ## Usage
 
@@ -85,6 +89,12 @@ cobra-obfuscator -i target.exe -o target_obf.exe --junk-density 0.5
 
 # Encrypt strings in .rdata
 cobra-obfuscator -i target.exe -o target_obf.exe --encrypt-strings
+
+# Hide imports (shadow IAT + runtime resolution)
+cobra-obfuscator -i target.exe -o target_obf.exe --hide-imports
+
+# Full protection — all passes + string encryption + import hiding
+cobra-obfuscator -i target.exe -o target_obf.exe --encrypt-strings --hide-imports
 ```
 
 ### CLI Options
@@ -98,6 +108,7 @@ cobra-obfuscator -i target.exe -o target_obf.exe --encrypt-strings
 | `--disable` | Comma-separated passes to skip | none |
 | `--junk-density` | Junk insertion probability (0.0–1.0) | `0.3` |
 | `--encrypt-strings` | XOR-encrypt `.rdata` strings + startup decryptor | off |
+| `--hide-imports` | Redirect IAT to shadow IAT with runtime resolution | off |
 | `--format` | Force input format: `auto`, `coff`, `pe` | `auto` |
 
 ### Pass Names (for `--disable`)
@@ -177,6 +188,7 @@ src/
 │   ├── pdata.rs         Exception table parsing
 │   ├── reloc.rs         PE relocation handling
 │   ├── strings.rs       String encryption + decryptor generation
+│   ├── imports.rs       Import hiding + shadow IAT + resolver generation
 │   └── types.rs         PE data structures
 ├── coff/
 │   ├── reader.rs        COFF object file parsing
