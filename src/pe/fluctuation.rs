@@ -13,7 +13,7 @@ fn align_up(value: u32, alignment: u32) -> u32 {
     (value + alignment - 1) & !(alignment - 1)
 }
 
-// ── Data block layout (96 bytes) ──────────────────────────────────────────
+// ── Data block layout (104 bytes) ─────────────────────────────────────────
 const DATA_XOR_KEY: usize = 0x00;           // 16 bytes
 const DATA_TEXT_VA: usize = 0x10;           // u64 — computed at runtime by setup
 const DATA_TEXT_SIZE: usize = 0x18;         // u64 — filled at build time
@@ -25,7 +25,8 @@ const DATA_P_CREATE_TQ: usize = 0x40;       // u64 — runtime
 const DATA_P_CREATE_TQT: usize = 0x48;      // u64 — runtime
 const DATA_IS_ENCRYPTED: usize = 0x50;      // u64 — runtime flag
 const DATA_OLD_PROTECT: usize = 0x58;       // u64 — scratch for VirtualProtect
-const DATA_BLOCK_SIZE: usize = 0x60;
+const DATA_LOCK: usize = 0x60;              // u32 — spinlock (0=unlocked, 1=locked)
+const DATA_BLOCK_SIZE: usize = 0x68;
 
 // ── API name strings ──────────────────────────────────────────────────────
 const STR_KERNEL32: &[u8] = b"kernel32.dll\0";
@@ -188,6 +189,31 @@ impl CodeBuilder {
     fn patch_u8(&mut self, offset: usize, val: u8) {
         self.code[offset] = val;
     }
+
+    /// Emit spinlock acquire: atomically sets dword [rip+lock_rva] from 0→1.
+    /// Spins with `pause` until successful. 21 bytes.
+    fn emit_spinlock_acquire(&mut self, lock_rva: u32) {
+        let spin_start = self.pos();
+        self.emit(&[0x31, 0xC0]);                         // xor eax, eax (expected=0)
+        self.emit(&[0xB9, 0x01, 0x00, 0x00, 0x00]);       // mov ecx, 1 (desired=1)
+        // lock cmpxchg dword [rip+disp32], ecx — 8 bytes
+        let disp = self.rip_disp(8, lock_rva);
+        self.emit(&[0xF0, 0x0F, 0xB1, 0x0D]);
+        self.emit(&disp.to_le_bytes());
+        self.emit(&[0x74, 0x04]);                         // je .acquired (+4)
+        self.emit(&[0xF3, 0x90]);                         // pause
+        let rel = (spin_start as isize - (self.pos() as isize + 2)) as i8;
+        self.emit(&[0xEB, rel as u8]);                    // jmp .spin
+        // .acquired:
+    }
+
+    /// Emit spinlock release: mov dword [rip+lock_rva], 0. 10 bytes.
+    fn emit_spinlock_release(&mut self, lock_rva: u32) {
+        let disp = self.rip_disp(10, lock_rva);
+        self.emit(&[0xC7, 0x05]);
+        self.emit(&disp.to_le_bytes());
+        self.emit(&[0x00, 0x00, 0x00, 0x00]);
+    }
 }
 
 // ── XOR crypt subroutine (34 bytes) ──────────────────────────────────────
@@ -230,10 +256,12 @@ const XOR_CRYPT_CODE: [u8; 34] = [
 /// Called by Windows timer thread pool:
 ///   VOID CALLBACK TimerCallback(PVOID param, BOOLEAN fired)
 ///
-/// 1. VirtualProtect(.text, size, PAGE_READWRITE, &old)
-/// 2. xor_crypt(.text, size, &key)
-/// 3. VirtualProtect(.text, size, PAGE_READONLY, &old)
-/// 4. is_encrypted = 1
+/// 1. Acquire spinlock
+/// 2. is_encrypted = 1  (set BEFORE removing execute — VEH will see this and spin on lock)
+/// 3. VirtualProtect(.text, size, PAGE_READWRITE, &old)
+/// 4. xor_crypt(.text, size, &key)
+/// 5. VirtualProtect(.text, size, PAGE_READONLY, &old)
+/// 6. Release spinlock
 fn generate_timer_callback(
     callback_rva: u32,
     data_rva: u32,
@@ -247,6 +275,12 @@ fn generate_timer_callback(
     cb.emit(&[0x48, 0x89, 0xE5]);         // mov rbp, rsp
     cb.emit(&[0x48, 0x83, 0xE4, 0xF0]);   // and rsp, -16
     cb.emit(&[0x48, 0x83, 0xEC, 0x30]);   // sub rsp, 48
+
+    // Acquire spinlock
+    cb.emit_spinlock_acquire(data_rva + DATA_LOCK as u32);
+
+    // is_encrypted = 1 (set before VirtualProtect so VEH knows to wait)
+    cb.emit_mov_qword_rip_imm32(data_rva + DATA_IS_ENCRYPTED as u32, 1);
 
     // VirtualProtect(text_va, text_size, PAGE_READWRITE=4, &old_protect)
     cb.emit_mov_rcx_qword_rip(data_rva + DATA_TEXT_VA as u32);
@@ -268,8 +302,8 @@ fn generate_timer_callback(
     cb.emit_lea_r9_rip(data_rva + DATA_OLD_PROTECT as u32);
     cb.emit_call_qword_rip(data_rva + DATA_P_VIRTUALPROTECT as u32);
 
-    // is_encrypted = 1
-    cb.emit_mov_qword_rip_imm32(data_rva + DATA_IS_ENCRYPTED as u32, 1);
+    // Release spinlock
+    cb.emit_spinlock_release(data_rva + DATA_LOCK as u32);
 
     // Epilogue
     cb.emit(&[0x48, 0x89, 0xEC]);         // mov rsp, rbp
@@ -288,9 +322,11 @@ fn generate_timer_callback(
 /// 1. Check ExceptionCode == ACCESS_VIOLATION (0xC0000005)
 /// 2. Check ExceptionAddress in [text_va, text_va+text_size)
 /// 3. Check is_encrypted == 1
-/// 4. Decrypt .text, mark PAGE_EXECUTE_READ
-/// 5. Schedule re-encrypt timer
-/// 6. Return EXCEPTION_CONTINUE_EXECUTION (-1)
+/// 4. Acquire spinlock (waits for timer callback to finish if in progress)
+/// 5. Decrypt .text, mark PAGE_EXECUTE_READ, is_encrypted = 0
+/// 6. Release spinlock
+/// 7. Schedule re-encrypt timer
+/// 8. Return EXCEPTION_CONTINUE_EXECUTION (-1)
 fn generate_veh_handler(
     handler_rva: u32,
     data_rva: u32,
@@ -341,6 +377,9 @@ fn generate_veh_handler(
     let jne_search_2 = cb.pos();
     cb.emit(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne .search (placeholder)
 
+    // ── Acquire spinlock (waits for timer to finish encrypting) ──
+    cb.emit_spinlock_acquire(data_rva + DATA_LOCK as u32);
+
     // ── Decrypt .text ──
 
     // VirtualProtect(text_va, text_size, PAGE_READWRITE=4, &old)
@@ -366,7 +405,10 @@ fn generate_veh_handler(
     // is_encrypted = 0
     cb.emit_mov_qword_rip_imm32(data_rva + DATA_IS_ENCRYPTED as u32, 0);
 
-    // Schedule re-encrypt timer:
+    // ── Release spinlock ──
+    cb.emit_spinlock_release(data_rva + DATA_LOCK as u32);
+
+    // Schedule re-encrypt timer (AFTER releasing lock):
     // CreateTimerQueueTimer(&timer_handle, timer_queue, timer_callback, NULL, delay_ms, 0, 0)
     cb.emit_lea_rcx_rip(data_rva + DATA_TIMER_HANDLE as u32);  // &timer_handle
     cb.emit_mov_rdx_qword_rip(data_rva + DATA_TIMER_QUEUE as u32); // timer_queue

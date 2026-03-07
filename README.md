@@ -137,14 +137,14 @@ The test matrix covers multiple compilers, optimization levels, pass combination
 
 - **Compilers** — GCC (MinGW), Clang (MinGW target), MSVC (cl.exe), Rust (debug + release), Go
 - **Optimization levels** — `-O0` through `-O3`, `-Os` (GCC/Clang), `/Od`, `/O1`, `/O2` (MSVC)
-- **9 C test programs** — minimal, medium, loops, recursion, switch_heavy, selfval, bitops, structs, func_ptrs
+- **10 C test programs** — minimal, medium, loops, recursion, switch_heavy, selfval, bitops, structs, func_ptrs, fluctuation
 - **2 Rust test programs** — rust_crypto, rust_structs (debug + release builds)
 - **2 Go test programs** — go_algorithms, go_crypto
 - **DLL tests** — C DLL and Rust cdylib with loader programs that validate exported functions
 - **11 pass combinations** — all passes, each pass solo, pairwise combos, triple combos
 - **10 seeds** per configuration
 
-Test programs exercise: deep nesting, mutual recursion, Ackermann function, binary exponentiation, bubble sort, state machines, large/sparse/nested switch statements, heap allocation, function pointers, bitwise operations, structs, hashing, sorting, primality testing, and cryptographic operations.
+Test programs exercise: deep nesting, mutual recursion, Ackermann function, binary exponentiation, bubble sort, state machines, large/sparse/nested switch statements, heap allocation, function pointers, bitwise operations, structs, hashing, sorting, primality testing, cryptographic operations, and VEH-based runtime .text encryption/decryption cycles.
 
 ```bash
 # Run the full matrix (auto-detects available compilers)
@@ -158,15 +158,15 @@ JOBS=12 bash run_matrix.sh
 
 | Target | .text Coverage | Mode | Status |
 |--------|---------------|------|--------|
-| C (GCC, 9 programs) | 58–63% | Scatter | All pass |
-| C (Clang, 9 programs) | 58–63% | Scatter | All pass |
-| C (MSVC, 9 programs) | 55–60% | Extension | All pass |
+| C (GCC, 10 programs) | 58–63% | Scatter | All pass |
+| C (Clang, 10 programs) | 58–63% | Scatter | All pass |
+| C (MSVC, 10 programs) | 55–60% | Extension | All pass |
 | Rust (debug + release) | 76–84% | Scatter | All pass |
 | Go (2 programs) | 40–50% | In-place | All pass |
 | C DLL (GCC) | ~68% | Scatter | All pass |
 | Rust DLL (cdylib) | ~80% | Scatter | All pass |
 
-**13,750 tests** across all compilers, optimization levels, pass combinations, and seeds — all passing.
+**15,180 tests** across all compilers, optimization levels, pass combinations, and seeds — all passing.
 
 The test runner uses **cached compilation** (only rebuilds when sources change) and **parallel execution** via `xargs -P` (saturates all available cores).
 
