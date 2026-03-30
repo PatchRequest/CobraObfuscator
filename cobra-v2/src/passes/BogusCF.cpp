@@ -23,6 +23,10 @@ llvm::PreservedAnalyses BogusCFPass::run(
     for (auto *BB : blocks) {
         if (BB->size() < 2) continue;
         if (!rng.chance(0.4)) continue;  // 40% chance per block
+        // Skip blocks that start with PHI nodes: splitBasicBlockBefore
+        // redirects all predecessors (including back-edges) to the new guard
+        // block, collapsing PHI incoming entries onto a single predecessor.
+        if (llvm::isa<llvm::PHINode>(BB->front())) continue;
 
         // Create bogus block with fake computation
         auto *bogusBB = llvm::BasicBlock::Create(

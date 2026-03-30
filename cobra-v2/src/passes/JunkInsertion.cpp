@@ -17,7 +17,10 @@ llvm::PreservedAnalyses JunkInsertionPass::run(
     auto *i32Ty = llvm::Type::getInt32Ty(F.getContext());
     auto *i64Ty = llvm::Type::getInt64Ty(F.getContext());
 
-    // Create junk allocas in the entry block
+    // Create junk allocas in the entry block.
+    // Insert ALL allocas first (grouped together), then the initialization
+    // stores, so CFF's alloca-skipping split doesn't strand an alloca in a
+    // non-entry block.
     auto &entry = F.getEntryBlock();
     llvm::IRBuilder<> allocaB(&entry, entry.begin());
 
@@ -26,11 +29,18 @@ llvm::PreservedAnalyses JunkInsertionPass::run(
     for (int i = 0; i < numJunkVars; ++i) {
         auto *ty = rng.chance(0.5) ? i32Ty : i64Ty;
         auto *alloca = allocaB.CreateAlloca(ty, nullptr, "junk");
-        allocaB.CreateStore(
-            llvm::ConstantInt::get(ty, rng.nextU32()), alloca);
         junkAllocas.push_back(alloca);
         changed = true;
     }
+    // Initialization stores go right after all the allocas
+    for (auto *alloca : junkAllocas) {
+        auto *ty = alloca->getAllocatedType();
+        allocaB.CreateStore(llvm::ConstantInt::get(ty, rng.nextU32()), alloca);
+    }
+
+    // Record the first instruction after the junk alloca+store section so
+    // that the scatter step never inserts a load before any of the allocas.
+    llvm::Instruction *firstNonJunk = &*allocaB.GetInsertPoint();
 
     // Scatter junk operations through each block
     std::vector<llvm::BasicBlock *> blocks;
@@ -40,13 +50,25 @@ llvm::PreservedAnalyses JunkInsertionPass::run(
     for (auto *BB : blocks) {
         if (BB->size() < 2) continue;
 
+        // For the entry block, start scattering only after the junk section.
+        // For all blocks, skip past any leading PHI nodes (non-PHI
+        // instructions cannot be inserted before PHIs in LLVM IR).
+        llvm::BasicBlock::iterator startIt =
+            (BB == &entry) ? llvm::BasicBlock::iterator(firstNonJunk)
+                           : BB->getFirstNonPHIIt();
+
+        // Count usable (non-terminator) instructions from startIt
+        unsigned usable = 0;
+        for (auto it = startIt; it != BB->end(); ++it)
+            if (!it->isTerminator()) ++usable;
+        if (usable == 0) continue;
+
         int numJunk = rng.nextInRange(1, 4);
         for (int i = 0; i < numJunk; ++i) {
-            auto it = BB->begin();
-            int steps = rng.nextInRange(0, std::max(1u,
-                (uint32_t)BB->size() - 1));
+            auto it = startIt;
+            int steps = rng.nextInRange(0, std::max(1u, usable) - 1);
             for (int s = 0; s < steps && it != BB->end(); ++s, ++it);
-            if (it->isTerminator()) continue;
+            if (it == BB->end() || it->isTerminator()) continue;
 
             llvm::IRBuilder<> B(&*it);
 

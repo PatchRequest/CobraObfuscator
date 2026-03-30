@@ -25,6 +25,10 @@ llvm::PreservedAnalyses DeadCodePass::run(
     for (auto *BB : blocks) {
         if (BB->size() < 2) continue;
         if (!rng.chance(0.5)) continue;  // 50% of blocks
+        // Skip blocks with PHI nodes: splitBasicBlockBefore redirects all
+        // predecessors (including back-edges) to the new guard block, which
+        // collapses multiple PHI incoming entries onto the same predecessor.
+        if (llvm::isa<llvm::PHINode>(BB->front())) continue;
 
         // Create a fake block with junk instructions
         auto *fakeBB = llvm::BasicBlock::Create(
