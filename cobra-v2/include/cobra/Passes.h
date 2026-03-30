@@ -44,6 +44,18 @@ private:
     RNG &rng;
 };
 
+// --- Dead Code (Opaque Predicates) ---
+class DeadCodePass : public llvm::PassInfoMixin<DeadCodePass> {
+public:
+    DeadCodePass(CobraConfig &config, RNG &rng)
+        : config(config), rng(rng) {}
+    llvm::PreservedAnalyses run(llvm::Function &F,
+                                 llvm::FunctionAnalysisManager &AM);
+private:
+    CobraConfig &config;
+    RNG &rng;
+};
+
 void registerFunctionPasses(llvm::FunctionPassManager &FPM,
                             CobraConfig &config, RNG &rng);
 void registerModulePasses(llvm::ModulePassManager &MPM,

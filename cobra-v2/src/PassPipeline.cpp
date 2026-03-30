@@ -59,6 +59,7 @@ void registerFunctionPasses(llvm::FunctionPassManager &FPM,
     FPM.addPass(ConstantUnfoldPass(config, rng));
     FPM.addPass(InsnSubstitutionPass(config, rng));
     FPM.addPass(MBAPass(config, rng));
+    FPM.addPass(DeadCodePass(config, rng));
 }
 
 void registerModulePasses(llvm::ModulePassManager &MPM,
