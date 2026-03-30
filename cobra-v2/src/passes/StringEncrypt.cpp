@@ -56,6 +56,13 @@ llvm::PreservedAnalyses StringEncryptPass::run(
             M, encType, true, llvm::GlobalValue::PrivateLinkage,
             keyInit, "cobra.key." + GV->getName());
 
+        // Create a guard flag so decryption only happens once
+        auto *i1Ty = llvm::Type::getInt1Ty(ctx);
+        auto *guardGV = new llvm::GlobalVariable(
+            M, i1Ty, false, llvm::GlobalValue::PrivateLinkage,
+            llvm::ConstantInt::getFalse(ctx),
+            "cobra.guard." + GV->getName());
+
         // Create decryption function
         auto *decFnTy = llvm::FunctionType::get(ptrTy, {}, false);
         auto *decFn = llvm::Function::Create(
@@ -66,8 +73,10 @@ llvm::PreservedAnalyses StringEncryptPass::run(
         auto *loopBB = llvm::BasicBlock::Create(ctx, "loop", decFn);
         auto *exitBB = llvm::BasicBlock::Create(ctx, "exit", decFn);
 
+        // Entry: check guard flag, skip decryption if already done
         llvm::IRBuilder<> entryB(entryBB);
-        entryB.CreateBr(loopBB);
+        auto *alreadyDecrypted = entryB.CreateLoad(i1Ty, guardGV);
+        entryB.CreateCondBr(alreadyDecrypted, exitBB, loopBB);
 
         llvm::IRBuilder<> loopB(loopBB);
         auto *idx = loopB.CreatePHI(i64Ty, 2, "idx");
@@ -85,7 +94,9 @@ llvm::PreservedAnalyses StringEncryptPass::run(
         auto *done = loopB.CreateICmpEQ(nextIdx, llvm::ConstantInt::get(i64Ty, len));
         loopB.CreateCondBr(done, exitBB, loopBB);
 
+        // Exit: set guard flag and return pointer
         llvm::IRBuilder<> exitB(exitBB);
+        exitB.CreateStore(llvm::ConstantInt::getTrue(ctx), guardGV);
         exitB.CreateRet(encGV);
 
         // Replace uses of original global
