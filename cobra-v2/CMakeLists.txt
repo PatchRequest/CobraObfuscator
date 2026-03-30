@@ -19,6 +19,7 @@ add_executable(cobra-v2
     src/main.cpp
     src/PassPipeline.cpp
     src/passes/InsnSubstitution.cpp
+    src/passes/MBA.cpp
 )
 
 llvm_map_components_to_libnames(LLVM_LIBS
