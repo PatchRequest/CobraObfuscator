@@ -122,6 +122,9 @@ llvm::PreservedAnalyses FuncMergeSplitPass::run(
         }
     }
 
+    if (config.verbose && changed)
+        llvm::errs() << "[func-merge-split] merged functions in module\n";
+
     return changed ? llvm::PreservedAnalyses::none()
                    : llvm::PreservedAnalyses::all();
 }

@@ -53,6 +53,9 @@ llvm::PreservedAnalyses BogusCFPass::run(
         changed = true;
     }
 
+    if (config.verbose && changed)
+        llvm::errs() << "[bogus-cf] " << F.getName() << "\n";
+
     return changed ? llvm::PreservedAnalyses::none()
                    : llvm::PreservedAnalyses::all();
 }

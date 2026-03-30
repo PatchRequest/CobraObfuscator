@@ -120,6 +120,9 @@ llvm::PreservedAnalyses StringEncryptPass::run(
         changed = true;
     }
 
+    if (config.verbose && changed)
+        llvm::errs() << "[string-encrypt] encrypted " << stringGlobals.size() << " strings\n";
+
     return changed ? llvm::PreservedAnalyses::none()
                    : llvm::PreservedAnalyses::all();
 }

@@ -82,6 +82,9 @@ llvm::PreservedAnalyses JunkInsertionPass::run(
         }
     }
 
+    if (config.verbose && changed)
+        llvm::errs() << "[junk-insertion] " << F.getName() << "\n";
+
     return changed ? llvm::PreservedAnalyses::none()
                    : llvm::PreservedAnalyses::all();
 }

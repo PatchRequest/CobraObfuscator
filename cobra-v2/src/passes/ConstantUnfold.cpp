@@ -55,6 +55,9 @@ llvm::PreservedAnalyses ConstantUnfoldPass::run(
         }
     }
 
+    if (config.verbose && changed)
+        llvm::errs() << "[constant-unfold] " << F.getName() << "\n";
+
     return changed ? llvm::PreservedAnalyses::none()
                    : llvm::PreservedAnalyses::all();
 }

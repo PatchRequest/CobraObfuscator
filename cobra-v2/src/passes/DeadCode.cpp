@@ -59,6 +59,9 @@ llvm::PreservedAnalyses DeadCodePass::run(
         changed = true;
     }
 
+    if (config.verbose && changed)
+        llvm::errs() << "[dead-code] " << F.getName() << "\n";
+
     return changed ? llvm::PreservedAnalyses::none()
                    : llvm::PreservedAnalyses::all();
 }

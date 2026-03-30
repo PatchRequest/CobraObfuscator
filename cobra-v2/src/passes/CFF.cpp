@@ -155,6 +155,9 @@ llvm::PreservedAnalyses CFFPass::run(
         phi->eraseFromParent();
     }
 
+    if (config.verbose)
+        llvm::errs() << "[cff] " << F.getName() << "\n";
+
     return llvm::PreservedAnalyses::none();
 }
 

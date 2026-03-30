@@ -45,6 +45,9 @@ static std::vector<std::string> splitComma(const std::string &s) {
 }
 
 int main(int argc, char **argv) {
+    cl::SetVersionPrinter([](raw_ostream &OS) {
+        OS << "CobraObfuscator v2.0.0\n";
+    });
     cl::ParseCommandLineOptions(argc, argv, "CobraObfuscator v2\n");
 
     LLVMContext ctx;

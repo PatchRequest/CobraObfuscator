@@ -89,6 +89,9 @@ llvm::PreservedAnalyses IndirectBranchPass::run(
         }
     }
 
+    if (config.verbose && changed)
+        llvm::errs() << "[indirect-branch] indirected calls in module\n";
+
     return changed ? llvm::PreservedAnalyses::none()
                    : llvm::PreservedAnalyses::all();
 }

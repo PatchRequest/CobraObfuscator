@@ -53,6 +53,9 @@ llvm::PreservedAnalyses InsnSubstitutionPass::run(
         }
     }
 
+    if (config.verbose && changed)
+        llvm::errs() << "[insn-substitution] " << F.getName() << "\n";
+
     return changed ? llvm::PreservedAnalyses::none()
                    : llvm::PreservedAnalyses::all();
 }
