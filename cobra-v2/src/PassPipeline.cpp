@@ -68,6 +68,7 @@ void registerFunctionPasses(llvm::FunctionPassManager &FPM,
 void registerModulePasses(llvm::ModulePassManager &MPM,
                           CobraConfig &config, RNG &rng) {
     MPM.addPass(FuncMergeSplitPass(config, rng));
+    MPM.addPass(IndirectBranchPass(config, rng));
 }
 
 } // namespace cobra
