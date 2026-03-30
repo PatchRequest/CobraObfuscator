@@ -80,6 +80,18 @@ private:
     RNG &rng;
 };
 
+// --- Control Flow Flattening ---
+class CFFPass : public llvm::PassInfoMixin<CFFPass> {
+public:
+    CFFPass(CobraConfig &config, RNG &rng)
+        : config(config), rng(rng) {}
+    llvm::PreservedAnalyses run(llvm::Function &F,
+                                 llvm::FunctionAnalysisManager &AM);
+private:
+    CobraConfig &config;
+    RNG &rng;
+};
+
 void registerFunctionPasses(llvm::FunctionPassManager &FPM,
                             CobraConfig &config, RNG &rng);
 void registerModulePasses(llvm::ModulePassManager &MPM,
