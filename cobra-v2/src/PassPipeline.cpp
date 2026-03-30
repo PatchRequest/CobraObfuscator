@@ -54,10 +54,9 @@ void runPipeline(llvm::Module &M, CobraConfig &config) {
     }
 }
 
-// Stub implementations — passes added in later tasks
 void registerFunctionPasses(llvm::FunctionPassManager &FPM,
                             CobraConfig &config, RNG &rng) {
-    // Passes will be registered here as they're implemented
+    FPM.addPass(InsnSubstitutionPass(config, rng));
 }
 
 void registerModulePasses(llvm::ModulePassManager &MPM,
