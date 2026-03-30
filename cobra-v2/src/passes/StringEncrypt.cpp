@@ -64,10 +64,14 @@ llvm::PreservedAnalyses StringEncryptPass::run(
             "cobra.guard." + GV->getName());
 
         // Create decryption function
+        // Mark optnone+noinline so LLVM's backend optimizer doesn't try
+        // to transform our simple XOR loop (loop-simplify crashes on it)
         auto *decFnTy = llvm::FunctionType::get(ptrTy, {}, false);
         auto *decFn = llvm::Function::Create(
             decFnTy, llvm::GlobalValue::PrivateLinkage,
             "cobra.dec." + GV->getName(), M);
+        decFn->addFnAttr(llvm::Attribute::OptimizeNone);
+        decFn->addFnAttr(llvm::Attribute::NoInline);
 
         auto *entryBB = llvm::BasicBlock::Create(ctx, "entry", decFn);
         auto *loopBB = llvm::BasicBlock::Create(ctx, "loop", decFn);

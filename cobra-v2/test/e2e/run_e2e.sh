@@ -6,7 +6,7 @@ CLANG="/opt/homebrew/opt/llvm/bin/clang"
 CLANGXX="/opt/homebrew/opt/llvm/bin/clang++"
 TESTDIR="$(dirname "$0")"
 TMPDIR="/tmp/cobra_e2e"
-TIMEOUT=120
+TIMEOUT=60
 mkdir -p "$TMPDIR"
 
 PASS=0
@@ -40,7 +40,7 @@ run_c_test() {
         --passes "$passes" --seed "$seed" --iterations "$iterations" 2>/dev/null; then
         echo "FAIL (obfuscator)"; FAIL=$((FAIL + 1))
         FAILURES="$FAILURES\n  CRASH: $name ($passes s=$seed)"; return; fi
-    if ! run_with_timeout "$TIMEOUT" $CLANG "$TMPDIR/${name}_obf.bc" -o "$TMPDIR/${name}" -lm 2>/dev/null; then
+    if ! run_with_timeout "$TIMEOUT" $CLANG -O0 "$TMPDIR/${name}_obf.bc" -o "$TMPDIR/${name}" -lm 2>/dev/null; then
         echo "FAIL (link)"; FAIL=$((FAIL + 1))
         FAILURES="$FAILURES\n  LINK: $name ($passes s=$seed)"; return; fi
 
@@ -64,7 +64,7 @@ run_cpp_test() {
         --passes "$passes" --seed "$seed" 2>/dev/null; then
         echo "FAIL (obfuscator)"; FAIL=$((FAIL + 1))
         FAILURES="$FAILURES\n  CRASH: $name ($passes s=$seed)"; return; fi
-    if ! run_with_timeout 60 $CLANGXX "$TMPDIR/${name}_obf.bc" -o "$TMPDIR/${name}" 2>/dev/null; then
+    if ! run_with_timeout 60 $CLANGXX -O0 "$TMPDIR/${name}_obf.bc" -o "$TMPDIR/${name}" 2>/dev/null; then
         echo "FAIL (link/codegen timeout)"; FAIL=$((FAIL + 1))
         FAILURES="$FAILURES\n  LINK: $name ($passes s=$seed)"; return; fi
 
