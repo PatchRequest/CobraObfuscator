@@ -1,9 +1,23 @@
 #pragma once
 #include "cobra/CobraConfig.h"
 #include "cobra/RNG.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/PassManager.h"
 
 namespace cobra {
+
+// --- Constant Unfolding ---
+class ConstantUnfoldPass : public llvm::PassInfoMixin<ConstantUnfoldPass> {
+public:
+    ConstantUnfoldPass(CobraConfig &config, RNG &rng)
+        : config(config), rng(rng) {}
+    llvm::PreservedAnalyses run(llvm::Function &F,
+                                 llvm::FunctionAnalysisManager &AM);
+private:
+    CobraConfig &config;
+    RNG &rng;
+    llvm::Value *unfoldConstant(llvm::IRBuilder<> &B, llvm::ConstantInt *C);
+};
 
 // --- Instruction Substitution ---
 class InsnSubstitutionPass

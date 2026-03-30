@@ -56,6 +56,7 @@ void runPipeline(llvm::Module &M, CobraConfig &config) {
 
 void registerFunctionPasses(llvm::FunctionPassManager &FPM,
                             CobraConfig &config, RNG &rng) {
+    FPM.addPass(ConstantUnfoldPass(config, rng));
     FPM.addPass(InsnSubstitutionPass(config, rng));
     FPM.addPass(MBAPass(config, rng));
 }
