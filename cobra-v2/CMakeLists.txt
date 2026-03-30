@@ -25,6 +25,7 @@ add_executable(cobra-v2
     src/passes/DeadCode.cpp
     src/passes/JunkInsertion.cpp
     src/passes/CFF.cpp
+    src/passes/StringEncrypt.cpp
     src/utils/OpaquePredicates.cpp
 )
 

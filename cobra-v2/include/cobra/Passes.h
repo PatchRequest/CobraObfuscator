@@ -80,6 +80,18 @@ private:
     RNG &rng;
 };
 
+// --- String Encryption (ModulePass) ---
+class StringEncryptPass : public llvm::PassInfoMixin<StringEncryptPass> {
+public:
+    StringEncryptPass(CobraConfig &config, RNG &rng)
+        : config(config), rng(rng) {}
+    llvm::PreservedAnalyses run(llvm::Module &M,
+                                 llvm::ModuleAnalysisManager &AM);
+private:
+    CobraConfig &config;
+    RNG &rng;
+};
+
 // --- Control Flow Flattening ---
 class CFFPass : public llvm::PassInfoMixin<CFFPass> {
 public:

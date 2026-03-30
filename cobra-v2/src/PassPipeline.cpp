@@ -32,7 +32,7 @@ void runPipeline(llvm::Module &M, CobraConfig &config) {
         // Phase 1: Pre-CFF module passes (string-encrypt)
         {
             llvm::ModulePassManager MPM;
-            // string-encrypt registered here in later task
+            MPM.addPass(StringEncryptPass(config, rng));
             MPM.run(M, MAM);
         }
 
