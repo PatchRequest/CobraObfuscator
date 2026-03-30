@@ -68,6 +68,18 @@ private:
     RNG &rng;
 };
 
+// --- Junk Insertion ---
+class JunkInsertionPass : public llvm::PassInfoMixin<JunkInsertionPass> {
+public:
+    JunkInsertionPass(CobraConfig &config, RNG &rng)
+        : config(config), rng(rng) {}
+    llvm::PreservedAnalyses run(llvm::Function &F,
+                                 llvm::FunctionAnalysisManager &AM);
+private:
+    CobraConfig &config;
+    RNG &rng;
+};
+
 void registerFunctionPasses(llvm::FunctionPassManager &FPM,
                             CobraConfig &config, RNG &rng);
 void registerModulePasses(llvm::ModulePassManager &MPM,

@@ -61,6 +61,7 @@ void registerFunctionPasses(llvm::FunctionPassManager &FPM,
     FPM.addPass(MBAPass(config, rng));
     FPM.addPass(BogusCFPass(config, rng));
     FPM.addPass(DeadCodePass(config, rng));
+    FPM.addPass(JunkInsertionPass(config, rng));
 }
 
 void registerModulePasses(llvm::ModulePassManager &MPM,
