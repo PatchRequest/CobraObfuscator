@@ -21,6 +21,7 @@ add_executable(cobra-v2
     src/passes/ConstantUnfold.cpp
     src/passes/InsnSubstitution.cpp
     src/passes/MBA.cpp
+    src/passes/BogusCF.cpp
     src/passes/DeadCode.cpp
     src/utils/OpaquePredicates.cpp
 )
