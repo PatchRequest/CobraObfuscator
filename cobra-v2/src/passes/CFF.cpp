@@ -10,6 +10,81 @@
 
 namespace cobra {
 
+// Strategy 0: Switch dispatcher (original)
+static void buildSwitchDispatcher(
+    llvm::BasicBlock *dispatchBB, llvm::BasicBlock *defaultBB,
+    llvm::AllocaInst *stateVar,
+    const std::vector<llvm::BasicBlock *> &flatBlocks,
+    const std::vector<uint32_t> &stateIDs,
+    llvm::Type *i32Ty) {
+    llvm::IRBuilder<> B(dispatchBB);
+    auto *stateVal = B.CreateLoad(i32Ty, stateVar, "cff.curstate");
+    auto *sw = B.CreateSwitch(stateVal, defaultBB, flatBlocks.size());
+    for (size_t i = 0; i < flatBlocks.size(); ++i)
+        sw->addCase(llvm::cast<llvm::ConstantInt>(
+            llvm::ConstantInt::get(i32Ty, stateIDs[i])), flatBlocks[i]);
+}
+
+// Strategy 1: If-else chain dispatcher
+static void buildIfElseDispatcher(
+    llvm::BasicBlock *dispatchBB, llvm::BasicBlock *defaultBB,
+    llvm::AllocaInst *stateVar,
+    const std::vector<llvm::BasicBlock *> &flatBlocks,
+    const std::vector<uint32_t> &stateIDs,
+    llvm::Type *i32Ty, llvm::Function &F) {
+    auto &ctx = F.getContext();
+    llvm::IRBuilder<> B(dispatchBB);
+    auto *stateVal = B.CreateLoad(i32Ty, stateVar, "cff.curstate");
+
+    for (size_t i = 0; i < flatBlocks.size(); ++i) {
+        auto *cmp = B.CreateICmpEQ(stateVal,
+            llvm::ConstantInt::get(i32Ty, stateIDs[i]));
+        if (i == flatBlocks.size() - 1) {
+            B.CreateCondBr(cmp, flatBlocks[i], defaultBB);
+        } else {
+            auto *nextCheckBB = llvm::BasicBlock::Create(
+                ctx, "cff.check." + std::to_string(i), &F);
+            B.CreateCondBr(cmp, flatBlocks[i], nextCheckBB);
+            B.SetInsertPoint(nextCheckBB);
+        }
+    }
+}
+
+// Strategy 2: XOR + lookup table dispatcher
+static void buildLookupDispatcher(
+    llvm::BasicBlock *dispatchBB,
+    llvm::AllocaInst *stateVar,
+    const std::vector<llvm::BasicBlock *> &flatBlocks,
+    uint32_t xorKey,
+    llvm::Type *i32Ty, llvm::Function &F) {
+    auto &ctx = F.getContext();
+
+    // Build blockaddress array
+    std::vector<llvm::Constant *> blockAddrs;
+    for (size_t i = 0; i < flatBlocks.size(); ++i)
+        blockAddrs.push_back(llvm::BlockAddress::get(&F, flatBlocks[i]));
+
+    auto *ptrTy = llvm::PointerType::getUnqual(ctx);
+    auto *tableTy = llvm::ArrayType::get(ptrTy, flatBlocks.size());
+    auto *tableInit = llvm::ConstantArray::get(tableTy, blockAddrs);
+    auto *tableGV = new llvm::GlobalVariable(
+        *F.getParent(), tableTy, true, llvm::GlobalValue::PrivateLinkage,
+        tableInit, "cff.table." + F.getName().str());
+
+    // Dispatcher: load state, XOR with key, mod tableSize, load from table, indirectbr
+    llvm::IRBuilder<> B(dispatchBB);
+    auto *stateVal = B.CreateLoad(i32Ty, stateVar, "cff.curstate");
+    auto *xored = B.CreateXor(stateVal, llvm::ConstantInt::get(i32Ty, xorKey));
+    auto *idx = B.CreateURem(xored,
+        llvm::ConstantInt::get(i32Ty, flatBlocks.size()));
+    auto *idx64 = B.CreateZExt(idx, llvm::Type::getInt64Ty(ctx));
+    auto *gep = B.CreateGEP(ptrTy, tableGV, idx64);
+    auto *target = B.CreateLoad(ptrTy, gep);
+    auto *ibr = B.CreateIndirectBr(target, flatBlocks.size());
+    for (auto *BB : flatBlocks)
+        ibr->addDestination(BB);
+}
+
 llvm::PreservedAnalyses CFFPass::run(
     llvm::Function &F, llvm::FunctionAnalysisManager &AM) {
     if (!config.isPassEnabled("cff"))
@@ -19,6 +94,9 @@ llvm::PreservedAnalyses CFFPass::run(
 
     auto &ctx = F.getContext();
     auto *i32Ty = llvm::Type::getInt32Ty(ctx);
+
+    // Choose dispatcher strategy: 0=switch, 1=if-else, 2=lookup
+    int strategy = rng.nextU32() % 3;
 
     // Collect all blocks
     std::vector<llvm::BasicBlock *> origBlocks;
@@ -34,8 +112,7 @@ llvm::PreservedAnalyses CFFPass::run(
         ++splitPoint;
     }
 
-    llvm::BasicBlock *firstBB = entryBB->splitBasicBlock(
-        splitPoint, "cff.first");
+    entryBB->splitBasicBlock(splitPoint, "cff.first");
 
     // Create state variable alloca in entry (before the terminator that splitBasicBlock created)
     llvm::IRBuilder<> entryB(entryBB->getTerminator());
@@ -48,29 +125,45 @@ llvm::PreservedAnalyses CFFPass::run(
         flatBlocks.push_back(&BB);
     }
 
-    // Assign random state IDs
+    // Assign state IDs based on strategy
     std::vector<uint32_t> stateIDs;
-    for (size_t i = 0; i < flatBlocks.size(); ++i)
-        stateIDs.push_back(rng.nextU32());
+    uint32_t lookupXorKey = rng.nextU32();
 
-    // Create dispatcher block
+    if (strategy == 2) {
+        // Lookup: stateIDs[i] = i ^ xorKey, so (stateID ^ xorKey) % N == i
+        for (size_t i = 0; i < flatBlocks.size(); ++i)
+            stateIDs.push_back(static_cast<uint32_t>(i) ^ lookupXorKey);
+    } else {
+        // Switch/if-else: random state IDs
+        for (size_t i = 0; i < flatBlocks.size(); ++i)
+            stateIDs.push_back(rng.nextU32());
+    }
+
+    // Create dispatcher and default blocks
     auto *dispatchBB = llvm::BasicBlock::Create(ctx, "cff.dispatcher", &F);
-    llvm::IRBuilder<> dispB(dispatchBB);
-    auto *stateVal = dispB.CreateLoad(i32Ty, stateVar, "cff.curstate");
     auto *defaultBB = llvm::BasicBlock::Create(ctx, "cff.default", &F);
     llvm::IRBuilder<>(defaultBB).CreateUnreachable();
-    auto *sw = dispB.CreateSwitch(stateVal, defaultBB, flatBlocks.size());
 
-    for (size_t i = 0; i < flatBlocks.size(); ++i) {
-        sw->addCase(llvm::ConstantInt::get(i32Ty, stateIDs[i]),
-                     flatBlocks[i]);
+    // Build dispatcher based on chosen strategy
+    switch (strategy) {
+    case 0:
+        buildSwitchDispatcher(dispatchBB, defaultBB, stateVar,
+                              flatBlocks, stateIDs, i32Ty);
+        break;
+    case 1:
+        buildIfElseDispatcher(dispatchBB, defaultBB, stateVar,
+                              flatBlocks, stateIDs, i32Ty, F);
+        break;
+    case 2:
+        buildLookupDispatcher(dispatchBB, stateVar,
+                              flatBlocks, lookupXorKey, i32Ty, F);
+        break;
     }
 
     // Set initial state in entry block (replace the br that splitBasicBlock created)
     entryBB->getTerminator()->eraseFromParent();
     llvm::IRBuilder<> entryB2(entryBB);
-    entryB2.CreateStore(
-        llvm::ConstantInt::get(i32Ty, stateIDs[0]), stateVar);
+    entryB2.CreateStore(llvm::ConstantInt::get(i32Ty, stateIDs[0]), stateVar);
     entryB2.CreateBr(dispatchBB);
 
     // Build block-to-state map
@@ -86,32 +179,22 @@ llvm::PreservedAnalyses CFFPass::run(
 
         if (auto *br = llvm::dyn_cast<llvm::BranchInst>(term)) {
             if (br->isUnconditional()) {
-                auto *dest = br->getSuccessor(0);
-                auto it = blockToState.find(dest);
+                auto it = blockToState.find(br->getSuccessor(0));
                 if (it != blockToState.end()) {
                     llvm::IRBuilder<> B(br);
-                    B.CreateStore(
-                        llvm::ConstantInt::get(i32Ty, it->second),
-                        stateVar);
+                    B.CreateStore(llvm::ConstantInt::get(i32Ty, it->second), stateVar);
                     B.CreateBr(dispatchBB);
                     br->eraseFromParent();
                 }
             } else {
                 auto *cond = br->getCondition();
-                auto *trueDest = br->getSuccessor(0);
-                auto *falseDest = br->getSuccessor(1);
-                auto trueIt = blockToState.find(trueDest);
-                auto falseIt = blockToState.find(falseDest);
-
-                if (trueIt != blockToState.end() &&
-                    falseIt != blockToState.end()) {
+                auto trueIt = blockToState.find(br->getSuccessor(0));
+                auto falseIt = blockToState.find(br->getSuccessor(1));
+                if (trueIt != blockToState.end() && falseIt != blockToState.end()) {
                     llvm::IRBuilder<> B(br);
-                    auto *trueState = llvm::ConstantInt::get(
-                        i32Ty, trueIt->second);
-                    auto *falseState = llvm::ConstantInt::get(
-                        i32Ty, falseIt->second);
-                    auto *selected = B.CreateSelect(
-                        cond, trueState, falseState);
+                    auto *selected = B.CreateSelect(cond,
+                        llvm::ConstantInt::get(i32Ty, trueIt->second),
+                        llvm::ConstantInt::get(i32Ty, falseIt->second));
                     B.CreateStore(selected, stateVar);
                     B.CreateBr(dispatchBB);
                     br->eraseFromParent();
@@ -137,26 +220,23 @@ llvm::PreservedAnalyses CFFPass::run(
 
         // For each incoming value, store to alloca before the branch to dispatcher
         for (unsigned j = 0; j < phi->getNumIncomingValues(); ++j) {
-            auto *val = phi->getIncomingValue(j);
-            auto *pred = phi->getIncomingBlock(j);
-            // The predecessor's terminator should now be "store state + br dispatcher"
-            // Insert the store before the terminator
-            auto *predTerm = pred->getTerminator();
+            auto *predTerm = phi->getIncomingBlock(j)->getTerminator();
             llvm::IRBuilder<> B(predTerm);
-            B.CreateStore(val, alloca);
+            B.CreateStore(phi->getIncomingValue(j), alloca);
         }
 
         // Replace phi with load from alloca (insert after all phis in the block)
         auto insertIt = phi->getParent()->getFirstNonPHIIt();
-        llvm::Instruction *insertPt = &*insertIt;
-        llvm::IRBuilder<> B(insertPt);
+        llvm::IRBuilder<> B(&*insertIt);
         auto *loaded = B.CreateLoad(phi->getType(), alloca);
         phi->replaceAllUsesWith(loaded);
         phi->eraseFromParent();
     }
 
-    if (config.verbose)
-        llvm::errs() << "[cff] " << F.getName() << "\n";
+    if (config.verbose) {
+        const char *names[] = {"switch", "if-else", "lookup"};
+        llvm::errs() << "[cff:" << names[strategy] << "] " << F.getName() << "\n";
+    }
 
     return llvm::PreservedAnalyses::none();
 }

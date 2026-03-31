@@ -1,8 +1,7 @@
 ; RUN: %cobra -o - --passes cff --seed 42 --emit-ll %s | FileCheck %s
 
-; Should flatten control flow into a switch dispatcher
+; Should flatten control flow into a dispatcher
 ; CHECK-LABEL: define i32 @test_cff
-; CHECK: switch i32
 ; CHECK: cff.dispatcher
 define i32 @test_cff(i32 %n) {
 entry:
