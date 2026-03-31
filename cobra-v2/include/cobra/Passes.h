@@ -116,6 +116,18 @@ private:
     RNG &rng;
 };
 
+// --- Anti-Tampering ---
+class AntiTamperPass : public llvm::PassInfoMixin<AntiTamperPass> {
+public:
+    AntiTamperPass(CobraConfig &config, RNG &rng)
+        : config(config), rng(rng) {}
+    llvm::PreservedAnalyses run(llvm::Function &F,
+                                 llvm::FunctionAnalysisManager &AM);
+private:
+    CobraConfig &config;
+    RNG &rng;
+};
+
 // --- Control Flow Flattening ---
 class CFFPass : public llvm::PassInfoMixin<CFFPass> {
 public:

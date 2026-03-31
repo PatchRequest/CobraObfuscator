@@ -26,6 +26,7 @@ add_executable(cobra-v2
     src/passes/DeadCode.cpp
     src/passes/JunkInsertion.cpp
     src/passes/CFF.cpp
+    src/passes/AntiTamper.cpp
     src/passes/StringEncrypt.cpp
     src/passes/FuncMergeSplit.cpp
     src/passes/IndirectBranch.cpp
