@@ -95,10 +95,12 @@ E_CPP_CLASS=$'Rect: area=15\nCircle: area=48\nTri: area=12'
 E_CPP_TMPL=$'max(3,7)=7 max(2.5,1.5)=2.5\nmin(3,7)=3 min(2.5,1.5)=1.5\nsize=5 sum=150 max=50'
 E_CPP_EXC=$'div(10,3)=3 sqrt(16)=4\ncaught: div by zero\ncaught: negative\nnested=20'
 
-ALL_PASSES=(insn-substitution mba constant-unfold dead-code bogus-cf junk-insertion cff string-encrypt func-merge-split indirect-branch)
+ALL_PASSES=(insn-substitution mba constant-unfold dead-code bogus-cf junk-insertion cff string-encrypt func-merge-split indirect-branch anti-tamper symbol-strip)
 
 # C++ safe passes (dead-code/bogus-cf/junk-insertion cause codegen explosion on C++ IR)
-CPP_SAFE_PASSES=(insn-substitution mba constant-unfold cff string-encrypt func-merge-split indirect-branch)
+CPP_SAFE_PASSES=(insn-substitution mba constant-unfold cff string-encrypt func-merge-split indirect-branch anti-tamper symbol-strip)
+
+E_ANTI_TAMPER="sq=25 cube=27"
 
 echo "================================================================"
 echo "    CobraObfuscator v2 — Comprehensive E2E Test Suite"
@@ -111,9 +113,9 @@ echo ""
 
 echo "--- Section 1: C programs x individual passes ---"
 
-C_NAMES=(arith controlflow recursion strings loops switch structs fptr bitwise math arrays varargs)
-C_SRCS=("$TESTDIR/arith.c" "$TESTDIR/controlflow.c" "$TESTDIR/recursion.c" "$TESTDIR/strings.c" "$TESTDIR/loops.c" "$TESTDIR/switch.c" "$TESTDIR/structs.c" "$TESTDIR/function_pointers.c" "$TESTDIR/bitwise.c" "$TESTDIR/math_heavy.c" "$TESTDIR/arrays.c" "$TESTDIR/varargs.c")
-C_EXPECTS=("$E_ARITH" "$E_CF" "$E_RECURSION" "$E_STRINGS" "$E_LOOPS" "$E_SWITCH" "$E_STRUCTS" "$E_FPTR" "$E_BITWISE" "$E_MATH" "$E_ARRAYS" "$E_VARARGS")
+C_NAMES=(arith controlflow recursion strings loops switch structs fptr bitwise math arrays varargs anti_tamper)
+C_SRCS=("$TESTDIR/arith.c" "$TESTDIR/controlflow.c" "$TESTDIR/recursion.c" "$TESTDIR/strings.c" "$TESTDIR/loops.c" "$TESTDIR/switch.c" "$TESTDIR/structs.c" "$TESTDIR/function_pointers.c" "$TESTDIR/bitwise.c" "$TESTDIR/math_heavy.c" "$TESTDIR/arrays.c" "$TESTDIR/varargs.c" "$TESTDIR/anti_tamper.c")
+C_EXPECTS=("$E_ARITH" "$E_CF" "$E_RECURSION" "$E_STRINGS" "$E_LOOPS" "$E_SWITCH" "$E_STRUCTS" "$E_FPTR" "$E_BITWISE" "$E_MATH" "$E_ARRAYS" "$E_VARARGS" "$E_ANTI_TAMPER")
 
 for i in "${!C_NAMES[@]}"; do
     echo "  [${C_NAMES[$i]}]"
@@ -236,6 +238,26 @@ for seed in 1 42 100 555 9999; do
     for i in 0 4 5 8 10 11; do  # arith loops switch bitwise arrays math
         run_c_test "${C_NAMES[$i]}_stress_s${seed}" "${C_SRCS[$i]}" "${C_EXPECTS[$i]}" "all" "$seed" 2
     done
+done
+
+# ══════════════════════════════════════════════════════════════
+# SECTION 9: New feature-specific tests
+# ══════════════════════════════════════════════════════════════
+
+echo ""
+echo "--- Section 9: Feature-specific tests ---"
+
+# Anti-tamper + other passes
+run_c_test "at_cff" "$TESTDIR/anti_tamper.c" "$E_ANTI_TAMPER" "anti-tamper,cff"
+run_c_test "at_all" "$TESTDIR/anti_tamper.c" "$E_ANTI_TAMPER" "all"
+
+# Symbol strip + other passes
+run_c_test "arith_strip_cff" "$TESTDIR/arith.c" "$E_ARITH" "symbol-strip,cff"
+run_c_test "arith_strip_all" "$TESTDIR/arith.c" "$E_ARITH" "all"
+
+# CFF diversity — multiple seeds to exercise all 3 strategies
+for seed in 1 2 3 4 5 6 7 8 9 10; do
+    run_c_test "cf_cff_div_s${seed}" "$TESTDIR/controlflow.c" "$E_CF" "cff" "$seed"
 done
 
 # ══════════════════════════════════════════════════════════════

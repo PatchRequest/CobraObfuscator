@@ -1,0 +1,10 @@
+/Users/daniel/code/CobraObfuscator/cobra-v2/build/CMakeFiles/intrinsics_gen.dir
+/Users/daniel/code/CobraObfuscator/cobra-v2/build/CMakeFiles/vt_gen.dir
+/Users/daniel/code/CobraObfuscator/cobra-v2/build/CMakeFiles/omp_gen.dir
+/Users/daniel/code/CobraObfuscator/cobra-v2/build/CMakeFiles/acc_gen.dir
+/Users/daniel/code/CobraObfuscator/cobra-v2/build/CMakeFiles/ARMTargetParserTableGen.dir
+/Users/daniel/code/CobraObfuscator/cobra-v2/build/CMakeFiles/AArch64TargetParserTableGen.dir
+/Users/daniel/code/CobraObfuscator/cobra-v2/build/CMakeFiles/RISCVTargetParserTableGen.dir
+/Users/daniel/code/CobraObfuscator/cobra-v2/build/CMakeFiles/cobra-v2.dir
+/Users/daniel/code/CobraObfuscator/cobra-v2/build/CMakeFiles/edit_cache.dir
+/Users/daniel/code/CobraObfuscator/cobra-v2/build/CMakeFiles/rebuild_cache.dir
