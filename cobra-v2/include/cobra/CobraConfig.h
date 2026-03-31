@@ -11,6 +11,7 @@ struct CobraConfig {
     std::vector<std::string> enabledPasses;   // empty = all
     std::vector<std::string> excludedPasses;
     bool verbose = false;
+    bool stats = false;
 
     bool isPassEnabled(const std::string &name) const {
         if (!excludedPasses.empty()) {

@@ -17,6 +17,7 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 
 add_executable(cobra-v2
     src/main.cpp
+    src/Stats.cpp
     src/PassPipeline.cpp
     src/passes/ConstantUnfold.cpp
     src/passes/InsnSubstitution.cpp

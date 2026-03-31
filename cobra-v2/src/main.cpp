@@ -1,5 +1,6 @@
 #include "cobra/PassPipeline.h"
 #include "cobra/CobraConfig.h"
+#include "cobra/Stats.h"
 
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -30,6 +31,8 @@ static cl::opt<int> Iterations("iterations",
     cl::desc("Pipeline iterations"), cl::init(1));
 static cl::opt<bool> Verbose("verbose",
     cl::desc("Print per-pass statistics"), cl::init(false));
+static cl::opt<bool> Stats("print-stats",
+    cl::desc("Print before/after statistics"), cl::init(false));
 
 static std::vector<std::string> splitComma(const std::string &s) {
     std::vector<std::string> result;
@@ -66,8 +69,18 @@ int main(int argc, char **argv) {
     config.enabledPasses = splitComma(Passes);
     config.excludedPasses = splitComma(Exclude);
     config.verbose = Verbose;
+    config.stats = Stats;
+
+    cobra::PipelineStats pstats;
+    if (config.stats)
+        pstats.recordBefore(*mod);
 
     cobra::runPipeline(*mod, config);
+
+    if (config.stats) {
+        pstats.recordAfter(*mod);
+        pstats.print(llvm::errs());
+    }
 
     std::error_code ec;
     raw_fd_ostream out(OutputFile, ec, sys::fs::OF_None);
