@@ -15,8 +15,8 @@ add_definitions(${LLVM_DEFINITIONS_LIST})
 
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
-add_executable(cobra-v2
-    src/main.cpp
+# Shared sources (everything except main.cpp and Plugin.cpp)
+set(COBRA_SOURCES
     src/Stats.cpp
     src/PassPipeline.cpp
     src/passes/ConstantUnfold.cpp
@@ -33,6 +33,27 @@ add_executable(cobra-v2
     src/passes/SymbolStrip.cpp
     src/utils/OpaquePredicates.cpp
 )
+
+# Standalone CLI tool
+add_executable(cobra-v2
+    src/main.cpp
+    ${COBRA_SOURCES}
+)
+
+# LLVM pass plugin (shared library)
+add_library(cobra MODULE
+    src/Plugin.cpp
+    ${COBRA_SOURCES}
+)
+set_target_properties(cobra PROPERTIES
+    PREFIX "lib"
+    SUFFIX ".dylib"
+)
+# Plugin must NOT link LLVM libs — symbols come from the host compiler
+target_compile_definitions(cobra PRIVATE)
+if(APPLE)
+    target_link_options(cobra PRIVATE -undefined dynamic_lookup)
+endif()
 
 llvm_map_components_to_libnames(LLVM_LIBS
     core
