@@ -29,6 +29,7 @@ add_executable(cobra-v2
     src/passes/StringEncrypt.cpp
     src/passes/FuncMergeSplit.cpp
     src/passes/IndirectBranch.cpp
+    src/passes/SymbolStrip.cpp
     src/utils/OpaquePredicates.cpp
 )
 

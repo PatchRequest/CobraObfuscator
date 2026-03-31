@@ -128,6 +128,18 @@ private:
     RNG &rng;
 };
 
+// --- Symbol Stripping (ModulePass) ---
+class SymbolStripPass : public llvm::PassInfoMixin<SymbolStripPass> {
+public:
+    SymbolStripPass(CobraConfig &config, RNG &rng)
+        : config(config), rng(rng) {}
+    llvm::PreservedAnalyses run(llvm::Module &M,
+                                 llvm::ModuleAnalysisManager &AM);
+private:
+    CobraConfig &config;
+    RNG &rng;
+};
+
 void registerFunctionPasses(llvm::FunctionPassManager &FPM,
                             CobraConfig &config, RNG &rng);
 void registerModulePasses(llvm::ModulePassManager &MPM,
